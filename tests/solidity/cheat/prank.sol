@@ -44,7 +44,7 @@ contract SenderVerifierParent {
     if (s != msg.sender) {
       emit Sender(msg.sender);
       emit AssertionFailed("fail on first call");
-    }      
+    }
     c.verifyMsgSender(address(this));
     new ExpectedCreator(address(this));
   }
