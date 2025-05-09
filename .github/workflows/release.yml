@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - master
+      - address-0xa-patch
     tags:
       - "v*"
   pull_request:
