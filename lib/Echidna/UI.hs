@@ -15,7 +15,7 @@ import Control.Monad.ST (RealWorld)
 import Data.ByteString.Lazy qualified as BS
 import Data.List.Split (chunksOf)
 import Data.Map (Map)
-import Data.Map qualified as Map
+import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, fromMaybe)
 import Data.Sequence ((|>))
 import Data.Text (Text)
@@ -31,7 +31,8 @@ import UnliftIO
 import UnliftIO.Concurrent hiding (killThread, threadDelay)
 
 import EVM.Types (Addr, Contract, VM, VMType(Concrete), W256)
-import EVM.Solidity (SourceCache)
+import EVM.Solidity (SourceCache, SolcContract)
+import EVM.Dapp (DappInfo(..))
 
 import Echidna.ABI
 import Echidna.Campaign (runWorker, spawnListener)
