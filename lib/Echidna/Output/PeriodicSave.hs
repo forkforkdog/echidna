@@ -18,7 +18,7 @@ import EVM.Solidity (SourceCache(..), SolcContract)
 
 import Echidna.Output.Source
 import Echidna.Types.Config (Env(..))
-import Echidna.Types.Coverage (mergeCoverageMaps, FrozenCoverageMap)
+import Echidna.Types.Coverage (CoverageFileType(..), mergeCoverageMaps, FrozenCoverageMap)
 
 -- | Spawn a thread that periodically saves coverage data during campaign execution
 -- Returns the ThreadId so it can be killed when the campaign ends
