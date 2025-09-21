@@ -105,6 +105,7 @@ instance FromJSON EConfigWithUsage where
         <*> v ..:? "symExecNSolvers"    ..!= defaultSymExecNWorkers
         <*> v ..:? "symExecMaxIters"    ..!= defaultSymExecMaxIters
         <*> v ..:? "symExecAskSMTIters" ..!= defaultSymExecAskSMTIters
+        <*> v ..:? "saveEvery"          ..!= Nothing
 
       solConfParser = SolConf
         <$> v ..:? "contractAddr"    ..!= defaultContractAddr

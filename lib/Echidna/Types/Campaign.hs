@@ -63,6 +63,9 @@ data CampaignConf = CampaignConf
     -- ^ Number of times we may revisit a particular branching point
     -- before we consult the SMT solver to check reachability.
     -- Only relevant if symExec is True and symExecConcolic is False
+  , saveEvery          :: Maybe Int
+    -- ^ Save coverage data every N minutes during campaign execution.
+    -- If Nothing, coverage is only saved at the end of the campaign.
   }
 
 data WorkerType = FuzzWorker | SymbolicWorker deriving (Eq)

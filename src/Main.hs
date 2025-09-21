@@ -66,7 +66,7 @@ main = withUtf8 $ withCP65001 $ do
 
   initialCorpus <- loadInitialCorpus env
   -- start ui and run tests
-  _campaign <- runReaderT (ui vm dict initialCorpus cliSelectedContract) env
+  _campaign <- runReaderT (ui vm dict initialCorpus cliSelectedContract seed buildOutput.sources) env
 
   tests <- traverse readIORef env.testRefs
 
@@ -135,6 +135,7 @@ data Options = Options
   , cliDeployer         :: Maybe Addr
   , cliSender           :: [Addr]
   , cliSeed             :: Maybe Int
+  , cliSaveEvery        :: Maybe Int
   , cliDisableSlither   :: Bool
   , cliCryticArgs       :: Maybe String
   , cliSolcArgs         :: Maybe String
@@ -211,6 +212,9 @@ options = Options
   <*> optional (option auto $ long "seed"
     <> metavar "SEED"
     <> help "Run with a specific seed.")
+  <*> optional (option auto $ long "save-every"
+    <> metavar "MINUTES"
+    <> help "Save coverage data periodically every N minutes during campaign execution.")
   <*> switch (long "disable-slither"
     <> help "Disable running Slither.")
   <*> optional (option str $ long "crytic-args"
@@ -270,6 +274,7 @@ overrideConfig config Options{..} = do
       , shrinkLimit = fromMaybe campaignConf.shrinkLimit cliShrinkLimit
       , seqLen = fromMaybe campaignConf.seqLen cliSeqLen
       , seed = cliSeed <|> campaignConf.seed
+      , saveEvery = cliSaveEvery <|> campaignConf.saveEvery
       , workers = cliWorkers <|> campaignConf.workers
       , serverPort = cliServerPort <|> campaignConf.serverPort
       , symExec = fromMaybe campaignConf.symExec cliSymExec
