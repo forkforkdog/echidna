@@ -22,3 +22,13 @@ crytic-export/
 echidna.cabal
 *.swp
 profiles/
+/description
+/epub-book
+mark2epub/
+result
+foundry/
+.DS_Store
+EVM-Fuzzer-Analysis.epub
+ityfuzz/
+test-coverage.sol
+wake/
