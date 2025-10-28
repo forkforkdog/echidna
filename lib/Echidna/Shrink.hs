@@ -4,7 +4,7 @@ import Control.Monad ((<=<))
 import Control.Monad.Catch (MonadThrow)
 import Control.Monad.Random.Strict (MonadRandom, getRandomR, uniform)
 import Control.Monad.Reader.Class (MonadReader (ask), asks)
-import Control.Monad.State.Strict (MonadIO)
+import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.ST (RealWorld)
 import Data.Set qualified as Set
 import Data.List qualified as List
@@ -41,18 +41,21 @@ shrinkTest vm test = do
           -- since the canShrinkTx function is hard to enforce for all transactions in the sequence
           if length rr > 1 || any canShrinkTx rr then do
             maybeShrunk <- shrinkSeq vm (checkETest test) test.value rr
+            let attempt = i + 1
             -- check if the shrunk sequence passes the test or not
-            pure $ case maybeShrunk of
+            case maybeShrunk of
               -- the test still fails, let's create another test with the reduced sequence
               Just (txs, val, vm') -> do
-                Just test { state = Large (i + 1)
-                    , reproducer = txs
-                    , vm = Just vm'
-                    , result = getResultFromVM vm'
-                    , value = val }
-              Nothing ->
+                let test' = test { state = Large attempt
+                                 , reproducer = txs
+                                 , vm = Just vm'
+                                 , result = getResultFromVM vm'
+                                 , value = val }
+                pure $ Just test'
+              Nothing -> do
                 -- The test passed, so no success with shrinking this time, just bump number of tries to shrink
-                Just test { state = Large (i + 1), reproducer = rr}
+                let test' = test { state = Large attempt, reproducer = rr }
+                pure $ Just test'
           else
             pure $ Just test { state = if isOptimizationTest test
                                     then Large (i + 1)

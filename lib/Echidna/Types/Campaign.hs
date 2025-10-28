@@ -22,6 +22,8 @@ data CampaignConf = CampaignConf
     -- reset the state to avoid unrecoverable states/save memory\"
   , shrinkLimit        :: Int
     -- ^ Maximum number of candidate sequences to evaluate while shrinking
+  , showShrinkingEvery :: Maybe Int
+    -- ^ Optional interval (in iterations) to display shrinking progress in text mode
   , knownCoverage      :: Maybe CoverageMap
     -- ^ If applicable, initially known coverage. If this is 'Nothing',
     -- Echidna won't collect coverage information (and will go faster)

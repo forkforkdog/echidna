@@ -135,6 +135,7 @@ data Options = Options
   , cliRpcBlock         :: Maybe Word64
   , cliRpcUrl           :: Maybe Text
   , cliShrinkLimit      :: Maybe Int
+  , cliShowShrinkingEvery :: Maybe Int
   , cliSeqLen           :: Maybe Int
   , cliContractAddr     :: Maybe Addr
   , cliDeployer         :: Maybe Addr
@@ -205,6 +206,9 @@ options = Options . NE.fromList
   <*> optional (option auto $ long "shrink-limit"
     <> metavar "INTEGER"
     <> help ("Number of tries to attempt to shrink a failing sequence of transactions. Default is " ++ show defaultShrinkLimit))
+  <*> optional (option auto $ long "show-shrinking-every"
+    <> metavar "INTEGER"
+    <> help "Show intermediate shrinking progress every N shrink iterations (text mode only).")
   <*> optional (option auto $ long "seq-len"
     <> metavar "INTEGER"
     <> help ("Number of transactions to generate during testing. Default is " ++ show defaultSequenceLength))
@@ -281,6 +285,7 @@ overrideConfig config Options{..} = do
       , coverageDir = cliCoverageDir <|> campaignConf.coverageDir
       , testLimit = fromMaybe campaignConf.testLimit cliTestLimit
       , shrinkLimit = fromMaybe campaignConf.shrinkLimit cliShrinkLimit
+      , showShrinkingEvery = cliShowShrinkingEvery <|> campaignConf.showShrinkingEvery
       , seqLen = fromMaybe campaignConf.seqLen cliSeqLen
       , seed = cliSeed <|> campaignConf.seed
       , saveEvery = cliSaveEvery <|> campaignConf.saveEvery

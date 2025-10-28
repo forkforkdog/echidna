@@ -97,4 +97,5 @@ ppWorkerEvent = \case
       PropertyTest n _ -> n
       AssertionTest _ n _ -> encodeSig n
       CallTest n _ -> n
-      _ -> error "impossible"
+      OptimizationTest n _ -> n
+      Exploration -> "exploration"

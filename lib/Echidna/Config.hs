@@ -91,6 +91,7 @@ instance FromJSON EConfigWithUsage where
         <*> v ..:? "stopOnFail" ..!= False
         <*> v ..:? "seqLen" ..!= defaultSequenceLength
         <*> v ..:? "shrinkLimit" ..!= defaultShrinkLimit
+        <*> v ..:? "showShrinkingEvery" ..!= Nothing
         <*> (v ..:? "coverage" <&> \case Just False -> Nothing;  _ -> Just mempty)
         <*> v ..:? "seed"
         <*> v ..:? "dictFreq" ..!= 0.40
