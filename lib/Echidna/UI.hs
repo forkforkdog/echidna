@@ -13,6 +13,7 @@ import Control.Monad.Reader
 import Control.Monad.State.Strict hiding (state)
 import Control.Monad.ST (RealWorld)
 import Data.ByteString.Lazy qualified as BS
+import Data.List (foldl', nub)
 import Data.List.Split (chunksOf)
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
@@ -20,6 +21,7 @@ import Data.Maybe (isJust, fromMaybe)
 import Data.Sequence ((|>))
 import Data.Text (Text)
 import Data.Time
+import Data.Set qualified as Set
 import Graphics.Vty.Config (VtyUserConfig, defaultConfig, configInputMap)
 import Graphics.Vty.CrossPlatform (mkVty)
 import Graphics.Vty.Input.Events
@@ -45,8 +47,8 @@ import Echidna.Types.Campaign
 import Echidna.Types.Config
 import Echidna.Types.Corpus qualified as Corpus
 import Echidna.Types.Coverage (coverageStats)
-import Echidna.Types.Test (EchidnaTest(..), didFail, isOptimizationTest)
-import Echidna.Types.Tx (Tx)
+import Echidna.Types.Test (EchidnaTest(..), TestState(..), didFail, isOptimizationTest)
+import Echidna.Types.Tx (Tx(..))
 import Echidna.Types.Worker 
 import Echidna.UI.Report
 import Echidna.UI.Widgets
@@ -201,6 +203,7 @@ ui vm dict initialCorpus cliSelectedContract seed sources = do
       -- Track last update time and gas for delta calculation
       startTime <- liftIO getTimestamp
       lastUpdateRef <- liftIO $ newIORef $ GasTracker startTime 0
+      shrinkProgressRef <- liftIO $ newIORef Map.empty
 
       let printStatus = do
             states <- liftIO $ workerStates workers
@@ -209,6 +212,39 @@ ui vm dict initialCorpus cliSelectedContract seed sources = do
             putStrLn $ time <> "[status] " <> line
             hFlush stdout
 
+      let printShrinkingProgress = case conf.campaignConf.showShrinkingEvery of
+            Just freq | freq > 0 -> do
+              tests <- liftIO $ traverse readIORef env.testRefs
+              printed <- liftIO $ readIORef shrinkProgressRef
+              let freq' = max 1 freq
+                  shrinkable =
+                    [ (ppTestName test, n, test)
+                    | test <- tests
+                    , Large n <- [test.state]
+                    , not (null test.reproducer)
+                    ]
+                  shouldPrint ident n =
+                    let last = Map.findWithDefault 0 ident printed
+                    in (n `div` freq') > (last `div` freq')
+                  ready = filter (\(ident, n, _) -> shouldPrint ident n) shrinkable
+                  active = Set.fromList [ ident | (ident, _, _) <- shrinkable ]
+                  updated = foldl' (\m (ident, n, _) -> Map.insert ident n m) printed ready
+                  cleaned = Map.filterWithKey (\ident _ -> ident `Set.member` active) updated
+              liftIO $ writeIORef shrinkProgressRef cleaned
+              forM_ ready $ \(ident, n, test) -> do
+                timeStr <- timePrefix <$> getTimestamp
+                let limit = conf.campaignConf.shrinkLimit
+                liftIO $ putStrLn $ timeStr <> "[shrinking] " <> ident
+                  <> " - iteration " <> show n <> "/" <> show limit
+                  <> " (" <> show (length test.reproducer) <> " transactions)"
+                let printName = length (nub $ (.src) <$> test.reproducer) /= 1
+                prettyTxs <- liftIO $ runReaderT (mapM (ppTx vm printName) test.reproducer) env
+                liftIO $ do
+                  putStrLn "  Call sequence:"
+                  mapM_ (putStrLn . ("    " <>)) prettyTxs
+                  hFlush stdout
+            _ -> pure ()
+
       case conf.campaignConf.serverPort of
         Just port -> liftIO $ runSSEServer serverStopVar env port nworkers
         Nothing -> pure ()
@@ -216,6 +252,7 @@ ui vm dict initialCorpus cliSelectedContract seed sources = do
       ticker <- liftIO . forkIO . forever $ do
         threadDelay 3_000_000 -- 3 seconds
         printStatus
+        printShrinkingProgress
 
       -- wait for all events to be processed
       forM_ [uiEventsForwarderStopVar, corpusSaverStopVar] takeMVar
@@ -435,4 +472,3 @@ statusLine env states lastUpdateRef = do
     <> ", cov: " <> show points
     <> ", corpus: " <> show (Corpus.corpusSize corpus)
     <> ", gas/s: " <> show gasPerSecond
-

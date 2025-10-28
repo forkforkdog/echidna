@@ -96,9 +96,10 @@ loadInitialCorpus env = do
   case env.cfg.campaignConf.corpusDir of
     Nothing -> pure []
     Just dir -> do
+      ctxsUnshrunk <- loadTxs (dir </> "reproducers-unshrunk")
       ctxs1 <- loadTxs (dir </> "reproducers")
       ctxs2 <- loadTxs (dir </> "coverage")
-      pure (ctxs1 ++ ctxs2)
+      pure (ctxsUnshrunk ++ ctxs1 ++ ctxs2)
 
 mkEnv :: EConfig -> BuildOutput -> [EchidnaTest] -> World -> Maybe SlitherInfo -> IO Env
 mkEnv cfg buildOutput tests world slitherInfo = do
