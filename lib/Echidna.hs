@@ -9,6 +9,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.TLS.GHC (mkTLS)
 import System.FilePath ((</>))
 
 import EVM (cheatCode)
@@ -108,6 +109,13 @@ mkEnv cfg buildOutput tests world slitherInfo = do
   eventQueue <- newChan
   coverageRefInit <- newIORef mempty
   coverageRefRuntime <- newIORef mempty
+  -- Only allocate stats tracking when trackLineHits is enabled (performance overhead)
+  statsRefInit <- if cfg.campaignConf.trackLineHits
+                    then Just <$> mkTLS (newIORef mempty)
+                    else pure Nothing
+  statsRefRuntime <- if cfg.campaignConf.trackLineHits
+                       then Just <$> mkTLS (newIORef mempty)
+                       else pure Nothing
   corpusRef <- newIORef mempty
   testRefs <- traverse newIORef tests
   (contractCache, slotCache) <- Onchain.loadRpcCache cfg
@@ -117,6 +125,8 @@ mkEnv cfg buildOutput tests world slitherInfo = do
   -- TODO put in real path
   let dapp = dappInfo "/" buildOutput
   pure $ Env { cfg, dapp, codehashMap, fetchContractCache, fetchSlotCache, contractNameCache
-             , chainId, eventQueue, coverageRefInit, coverageRefRuntime, corpusRef, testRefs, world
+             , chainId, eventQueue, coverageRefInit, coverageRefRuntime
+             , statsRefInit, statsRefRuntime
+             , corpusRef, testRefs, world
              , slitherInfo
              }

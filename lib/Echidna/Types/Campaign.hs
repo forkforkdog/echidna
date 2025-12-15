@@ -70,6 +70,9 @@ data CampaignConf = CampaignConf
   , saveEvery          :: Maybe Int
     -- ^ Save coverage data every N minutes during campaign execution.
     -- If Nothing, coverage is only saved at the end of the campaign.
+  , trackLineHits      :: Bool
+    -- ^ Whether to track execution counts per line. This has significant
+    -- performance overhead (~50%) so it's disabled by default.
   }
 
 -- | The state of a fuzzing campaign.

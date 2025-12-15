@@ -110,6 +110,7 @@ instance FromJSON EConfigWithUsage where
         <*> v ..:? "symExecAskSMTIters" ..!= defaultSymExecAskSMTIters
         <*> v ..:? "symExecMaxExplore"  ..!= defaultSymExecMaxExplore
         <*> v ..:? "saveEvery"          ..!= Nothing
+        <*> v ..:? "trackLineHits"      ..!= False
         where
         smtSolver = v ..:? "symExecSMTSolver" >>= \case
           Just ("z3" :: String)  -> pure Z3

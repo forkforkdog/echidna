@@ -9,6 +9,7 @@ import Data.Map qualified as Map
 import Data.Map.Strict (Map)
 import Data.Set qualified as Set
 import Data.Text (toLower)
+import Data.Vector.Unboxed (Vector)
 import Data.Vector.Unboxed.Mutable (IOVector)
 import Data.Vector.Unboxed.Mutable qualified as VM
 import Data.Vector.Unboxed qualified as V
@@ -30,6 +31,20 @@ type FrozenCoverageMap = Map W256 (V.Vector CoverageInfo)
 -- | Basic coverage information
 type CoverageInfo = (OpIx, StackDepths, TxResults)
 
+-- | Map with the statistic information needed for source code printing.
+-- Indexed by contracts' compile-time codehash; see `CodehashMap`.
+-- Used during runtime data collection (mutable, per-thread).
+type StatsMap = Map W256 (IOVector StatsInfo)
+
+-- | Map with the statistic information needed for source code printing.
+-- Indexed by contracts' compile-time codehash; see `CodehashMap`.
+-- Used during statistics summarization (combining multiple `StatsMap`)
+-- and coverage report generation (immutable).
+type FrozenStatsMap = Map W256 (Vector StatsInfo)
+
+-- | Basic stats information: (execution count, revert count)
+type StatsInfo = (ExecQty, RevertQty)
+
 -- | Index per operation in the source code, obtained from the source mapping
 type OpIx = Int
 
@@ -38,6 +53,12 @@ type StackDepths = Word64
 
 -- | Packed TxResults used for coverage, corresponding bits are set
 type TxResults = Word64
+
+-- | Hit count for executions
+type ExecQty = Word64
+
+-- | Hit count for reverts
+type RevertQty = Word64
 
 -- | Given the CoverageMaps used for contract init and runtime, produce a single combined coverage map
 -- with op indices from init correctly shifted over (see srcMapForOpLocation in Echidna.Output.Source).
@@ -99,3 +120,14 @@ instance FromJSON CoverageFileType where
     readFn "text" = pure Txt
     readFn "txt"  = pure Txt
     readFn _ = fail "could not parse CoverageFileType"
+
+-- | Freeze a StatsMap (convert mutable vectors to immutable)
+freezeStatsMap :: StatsMap -> IO FrozenStatsMap
+freezeStatsMap = mapM V.freeze
+
+-- | Merge two FrozenStatsMaps by summing execution and revert counts
+mergeFrozenStatsMaps :: FrozenStatsMap -> FrozenStatsMap -> FrozenStatsMap
+mergeFrozenStatsMaps = Map.unionWith sumStatsVectors
+  where
+    sumStatsVectors v1 v2 = V.zipWith addStats v1 v2
+    addStats (e1, r1) (e2, r2) = (e1 + e2, r1 + r2)

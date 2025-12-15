@@ -88,7 +88,8 @@ saveCoverageWithTimestamp fileType seed timestamp dir sc cs covMap = do
       -- Include both seed and timestamp in filename for uniqueness
       fn = dir </> printf "covered.%d.%d%s" seed timestamp extension
       -- Reuse existing pretty-printing logic from Output.Source
-      cc = ppCoveredCode fileType sc cs covMap
+      -- Pass Nothing for stats since we don't track them during periodic saves
+      cc = ppCoveredCode fileType sc cs covMap Nothing
   -- Write the coverage report to file
   createDirectoryIfMissing True dir
   writeFile fn cc

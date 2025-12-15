@@ -18,6 +18,8 @@ import Data.IORef (readIORef, atomicWriteIORef, newIORef, writeIORef, modifyIORe
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, fromJust)
 import Data.Text qualified as T
+import Data.TLS.GHC (getTLS)
+import Data.Word (Word64)
 import Data.Vector qualified as V
 import Data.Vector.Unboxed.Mutable qualified as VMut
 import System.Environment (lookupEnv, getEnvironment)
@@ -254,7 +256,15 @@ execTxWithCov tx = do
 
   covContextRef <- liftIO $ newIORef (False, Nothing)
 
-  r <- execTxWith (execCov env covContextRef) tx
+  -- Get thread-local stats refs if tracking is enabled (avoids check in hot loop)
+  maybeStatsRefs <- liftIO $ case (env.statsRefInit, env.statsRefRuntime) of
+    (Just initTLS, Just runtimeTLS) -> do
+      initRef <- getTLS initTLS
+      runtimeRef <- getTLS runtimeTLS
+      pure $ Just (initTLS, runtimeTLS, initRef, runtimeRef)
+    _ -> pure Nothing
+
+  r <- execTxWith (execCov env covContextRef maybeStatsRefs) tx
 
   (grew, lastLoc) <- liftIO $ readIORef covContextRef
 
@@ -272,7 +282,7 @@ execTxWithCov tx = do
   pure (r, grew || grew')
   where
     -- the same as EVM.exec but collects coverage, will stop on a query
-    execCov env covContextRef = do
+    execCov env covContextRef maybeStatsRefs = do
       vm <- get
       (r, vm') <- liftIO $ loop vm
       put vm'
@@ -290,26 +300,40 @@ execTxWithCov tx = do
       stepVM :: VM Concrete RealWorld -> IO (VM Concrete RealWorld)
       stepVM = stToIO . execStateT (exec1 defaultConfig)
 
-      -- | Add current location to the CoverageMap
+      -- | Add current location to the CoverageMap (and optionally StatsMap)
       addCoverage :: VM Concrete RealWorld -> IO ()
       addCoverage !vm = do
         let (pc, opIx, depth) = currentCovLoc vm
             contract = currentContract vm
-            covRef = case contract.code of
-              InitCode _ _ -> env.coverageRefInit
-              _ -> env.coverageRefRuntime
-
-        maybeCovVec <- lookupUsingCodehashOrInsert env.codehashMap contract env.dapp covRef $ do
-          let
-            size = case contract.code of
+            isInitCode = case contract.code of
+              InitCode _ _ -> True
+              _ -> False
+            covRef = if isInitCode then env.coverageRefInit else env.coverageRefRuntime
+            contractSize = case contract.code of
               InitCode b _ -> BS.length b
               _ -> BS.length . forceBuf . fromJust . view bytecode $ contract
-          if size == 0 then pure Nothing else do
+
+        maybeCovVec <- lookupUsingCodehashOrInsert env.codehashMap contract env.dapp covRef $ do
+          if contractSize == 0 then pure Nothing else do
             -- IO for making a new vec
-            vec <- VMut.new size
+            vec <- VMut.new contractSize
             -- We use -1 for opIx to indicate that the location was not covered
-            forM_ [0..size-1] $ \i -> VMut.write vec i (-1, 0, 0)
+            forM_ [0..contractSize-1] $ \i -> VMut.write vec i (-1, 0, 0)
             pure $ Just vec
+
+        -- Stats tracking (only when enabled - zero overhead otherwise)
+        case maybeStatsRefs of
+          Just (_initTLS, _runtimeTLS, initRef, runtimeRef) -> do
+            let statsRef = if isInitCode then initRef else runtimeRef
+            maybeStatsVec <- lookupUsingCodehashOrInsert env.codehashMap contract env.dapp statsRef $ do
+              if contractSize == 0 then pure Nothing else do
+                vec <- VMut.replicate contractSize (0 :: Word64, 0 :: Word64)
+                pure $ Just vec
+            case maybeStatsVec of
+              Just statsVec -> when (opIx >= 0 && opIx < VMut.length statsVec) $
+                VMut.modify statsVec (\(execQty, revertQty) -> (execQty + 1, revertQty)) opIx
+              Nothing -> pure ()
+          Nothing -> pure ()
 
         case maybeCovVec of
           Nothing -> pure ()

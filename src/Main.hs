@@ -149,6 +149,7 @@ data Options = Options
   , cliSymExecTargets   :: [Text]
   , cliSymExecTimeout   :: Maybe Int
   , cliSymExecNSolvers  :: Maybe Int
+  , cliTrackLineHits    :: Bool
   }
 
 optsParser :: ParserInfo Options
@@ -247,6 +248,8 @@ options = Options . NE.fromList
   <*> optional (option auto $ long "sym-exec-n-solvers"
     <> metavar "INTEGER"
     <> help ("Number of symbolic execution solvers to run in parallel for each task (assuming sym-exec is enabled). Default is " ++ show defaultSymExecNWorkers))
+  <*> switch (long "track-line-hits"
+    <> help "Track execution count per line. WARNING: ~50% performance overhead.")
 
 versionOption :: Parser (a -> a)
 versionOption = infoOption
@@ -295,6 +298,7 @@ overrideConfig config Options{..} = do
       , symExecTargets = if null cliSymExecTargets then campaignConf.symExecTargets else cliSymExecTargets
       , symExecTimeout = fromMaybe campaignConf.symExecTimeout cliSymExecTimeout
       , symExecNSolvers = fromMaybe campaignConf.symExecNSolvers cliSymExecNSolvers
+      , trackLineHits = cliTrackLineHits || campaignConf.trackLineHits
       }
 
     overrideSolConf solConf = solConf
