@@ -21,6 +21,7 @@ import Echidna.Types.Solidity (SolConf)
 import Echidna.Types.Test (TestConf, EchidnaTest)
 import Echidna.Types.Tx (TxConf)
 import Echidna.Types.World (World)
+import Echidna.Types.Weight (WeightConfig(..))
 
 data OperationMode = Interactive | NonInteractive OutputFormat deriving (Show, Eq)
 data OutputFormat = Text | JSON | None deriving (Show, Eq)
@@ -42,6 +43,7 @@ data EConfig = EConfig
   , testConf :: TestConf
   , txConf :: TxConf
   , uiConf :: UIConf
+  , weightConf :: WeightConfig
 
   , rpcUrl :: Maybe Text
   , rpcBlock :: Maybe Word64
