@@ -35,6 +35,7 @@ import EVM.Types (Addr, abiKeccak, W256, FunctionSelector(..))
 import Echidna.Mutator.Array (mutateLL, replaceAt)
 import Echidna.Types.Random
 import Echidna.Types.Signature
+import Echidna.Types.Weight (WeightConfig(..))
 
 -- | Fallback function is the null string
 fallback :: SolSignature
@@ -410,14 +411,23 @@ genAbiCallM genDict abi = do
   mutateAbiCall solCall
 
 -- | Given a list of 'SolSignature's, generate a random 'SolCall' for one,
--- possibly with a dictionary.
+-- possibly with a dictionary. Uses weighted selection based on WeightConfig.
 genInteractionsM
   :: MonadRandom m
   => GenDict
+  -> WeightConfig      -- ^ Weight configuration for function selection
+  -> Text              -- ^ Contract name for weight lookup
   -> NonEmpty SolSignature
   -> m SolCall
-genInteractionsM genDict solSignatures =
-  rElem solSignatures >>= genAbiCallM genDict
+genInteractionsM genDict weightCfg contractName solSignatures = do
+  sig <- weightedSelect
+  genAbiCallM genDict sig
+  where
+    weightedSelect = Random.weighted $ NE.toList $ fmap addWeight solSignatures
+    addWeight sig =
+      let fullName = encodeSigWithName contractName sig
+          weight = Map.findWithDefault weightCfg.defaultWeight fullName weightCfg.functionWeights
+      in (sig, toRational weight)
 
 abiCalldata :: Text -> Vector AbiValue -> ByteString
 abiCalldata s xs = BSLazy.toStrict . runPut $ do

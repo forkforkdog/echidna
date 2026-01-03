@@ -10,6 +10,7 @@ import Data.ByteString qualified as BS
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
+import Data.Map qualified as Map
 import Data.Text (isPrefixOf)
 import Data.Yaml qualified as Y
 
@@ -19,6 +20,7 @@ import Echidna.Mutator.Corpus (defaultMutationConsts)
 import Echidna.Test
 import Echidna.Types.Campaign
 import Echidna.Types.Config
+import Echidna.Types.Weight (WeightConfig(..))
 import Echidna.Types.Coverage (CoverageFileType(..))
 import Echidna.Types.Solidity
 import Echidna.Types.Test (TestConf(..))
@@ -54,6 +56,7 @@ instance FromJSON EConfigWithUsage where
               <*> testConfParser
               <*> txConfParser
               <*> (UIConf <$> v ..:? "timeout" <*> formatParser)
+              <*> weightConfParser
               <*> v ..:? "rpcUrl"
               <*> v ..:? "rpcBlock"
               <*> v ..:? "etherscanApiKey"
@@ -76,6 +79,10 @@ instance FromJSON EConfigWithUsage where
         <*> getWord256 "maxTimeDelay" defaultTimeDelay
         <*> getWord256 "maxBlockDelay" defaultBlockDelay
         <*> getWord256 "maxValue" 100000000000000000000 -- 100 eth
+
+      weightConfParser = WeightConfig
+        <$> v ..:? "functionWeights" ..!= Map.empty
+        <*> v ..:? "defaultFunctionWeight" ..!= 1.0
 
       testConfParser = do
         psender <- v ..:? "psender" ..!= 0x10000

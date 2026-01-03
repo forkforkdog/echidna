@@ -15,24 +15,29 @@ import Control.Monad.ST (RealWorld)
 import Data.Map (Map, toList)
 import Data.Maybe (catMaybes)
 import Data.Set (Set)
+import Data.Text (Text)
 import Data.Set qualified as Set
 import Data.Vector qualified as V
+import Data.List.NonEmpty (NonEmpty)
 
 import EVM (initialContract, loadContract, resetState)
+import EVM.Dapp (DappInfo)
 import EVM.ABI (abiValueType)
 import EVM.Types hiding (Env, VMOpts(timestamp, gasprice))
 
 import Echidna.ABI
 import Echidna.Orphans.JSON ()
-import Echidna.SourceMapping (lookupUsingCodehash)
+import Echidna.SourceMapping (lookupUsingCodehash, findSrcByMetadata)
 import Echidna.Symbolic (forceWord, forceAddr)
 import Echidna.Types (fromEVM)
 import Echidna.Types.Config (Env(..), EConfig(..))
 import Echidna.Types.Random
 import Echidna.Types.Signature
-  (SignatureMap, SolCall, ContractA)
+  (SignatureMap, SolCall, SolSignature)
 import Echidna.Types.Tx
 import Echidna.Types.World (World(..))
+import EVM.Format (contractNamePart)
+import EVM.Solidity (SolcContract(..))
 import Echidna.Types.Campaign
 
 hasSelfdestructed :: VM Concrete s -> Addr -> Bool
@@ -54,6 +59,9 @@ getSignatures hmm (Just lmm) =
   -- once in a while, this will use the low-priority signature for the input generation
   usuallyVeryRarely hmm lmm
 
+-- | A contract with its name and signatures for weighted function selection
+type ContractAWithName = (Addr, Text, NonEmpty SolSignature)
+
 -- | Generate a random 'Transaction' with either synthesis or mutation of dictionary entries.
 genTx
   :: (MonadIO m, MonadRandom m, MonadState WorkerState m, MonadReader Env m)
@@ -63,12 +71,13 @@ genTx
 genTx world deployedContracts = do
   env <- ask
   let txConf = env.cfg.txConf
+      weightCfg = env.cfg.weightConf
   genDict <- gets (.genDict)
   sigMap <- getSignatures world.highSignatureMap world.lowSignatureMap
   sender <- rElem' world.senders
-  contractAList <- liftIO $ mapM (toContractA env sigMap) (toList deployedContracts)
-  (dstAddr, dstAbis) <- rElem' $ Set.fromList $ catMaybes contractAList
-  solCall <- genInteractionsM genDict dstAbis
+  contractAList <- liftIO $ mapM (toContractAWithName env sigMap) (toList deployedContracts)
+  (dstAddr, contractName, dstAbis) <- rElem' $ Set.fromList $ catMaybes contractAList
+  solCall <- genInteractionsM genDict weightCfg contractName dstAbis
   value <- genValue txConf.maxValue genDict.dictValues world.payableSigs solCall
   ts <- (,) <$> genDelay txConf.maxTimeDelay genDict.dictValues
             <*> genDelay txConf.maxBlockDelay genDict.dictValues
@@ -81,9 +90,22 @@ genTx world deployedContracts = do
             , delay = level ts
             }
   where
-    toContractA :: Env -> SignatureMap -> (Expr EAddr, Contract) -> IO (Maybe ContractA)
-    toContractA env sigMap (addr, c) =
-      fmap (forceAddr addr,) . snd <$> lookupUsingCodehash env.codehashMap c env.dapp sigMap
+    -- | Get contract address, name, and signatures for weighted function selection
+    toContractAWithName :: Env -> SignatureMap -> (Expr EAddr, Contract) -> IO (Maybe ContractAWithName)
+    toContractAWithName env sigMap (addr, c) = do
+      result <- lookupUsingCodehash env.codehashMap c env.dapp sigMap
+      case snd result of
+        Nothing -> pure Nothing
+        Just sigs -> do
+          let contractName = getContractName c env.dapp
+          pure $ Just (forceAddr addr, contractName, sigs)
+
+    -- | Extract contract name from contract using source metadata lookup
+    getContractName :: Contract -> DappInfo -> Text
+    getContractName c dapp =
+      case findSrcByMetadata c dapp of
+        Just solcContract -> contractNamePart solcContract.contractName
+        Nothing -> "Unknown"  -- Fallback if contract name cannot be determined
 
 genDelay :: MonadRandom m => W256 -> Set W256 -> m W256
 genDelay mv ds = do

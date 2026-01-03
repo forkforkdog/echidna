@@ -31,6 +31,15 @@ type ContractA = (Addr, NonEmpty SolSignature)
 -- | Indexed by contracts' compile-time codehash; see `CodehashMap`.
 type SignatureMap = Map W256 (NonEmpty SolSignature)
 
+-- | A signature paired with its selection weight for weighted fuzzing
+type WeightedSignature = (SolSignature, Double)
+
+-- | A contract with weighted signatures for weighted function selection
+type WeightedContractA = (Addr, NonEmpty WeightedSignature)
+
+-- | Indexed by contracts' compile-time codehash; see `CodehashMap`.
+type WeightedSignatureMap = Map W256 (NonEmpty WeightedSignature)
+
 knownBzzrPrefixes :: [ByteString]
 knownBzzrPrefixes =
   -- a1 65 "bzzr0" 0x58 0x20 (solc <= 0.5.8)
