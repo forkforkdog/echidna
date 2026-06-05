@@ -274,7 +274,7 @@ setupTx tx@Tx{call} = fromEVM $ do
             [LitAddr tx.src, LitAddr tx.dst, vm.block.coinbase]
           ++ fmap LitAddr [1..10] -- precompile addresses
         touched = if isCreate then [LitAddr tx.src] else [LitAddr tx.src, LitAddr tx.dst]
-      in SubState mempty touched initialAccessedAddrs mempty mempty mempty False mempty mempty
+      in SubState mempty touched initialAccessedAddrs mempty mempty mempty
 
 advanceBlock :: Block -> (W256, W256) -> Block
 advanceBlock blk (t,b) =

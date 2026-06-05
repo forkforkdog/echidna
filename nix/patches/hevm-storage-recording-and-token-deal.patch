@@ -11,15 +11,16 @@ index e045196d..0150d64d 100644
  import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize)
  import Data.ByteArray qualified as BA
  import Data.ByteString (ByteString)
-@@ -160,7 +160,7 @@ makeVm o = do
-       , origin = txorigin
-       , toAddr = txtoAddr
-       , value = o.value
--      , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty
-+      , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty False mempty mempty
+@@ -164,6 +164,9 @@ makeVm o = do
        , isCreate = o.create
        , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
        , txdataFloorGas = o.txdataFloorGas
++      , recordingStorageAccesses = False
++      , recordedStorageReads = mempty
++      , recordedStorageWrites = mempty
+       }
+     , logs = []
+     , traces = Zipper.fromForest []
 @@ -792,16 +792,22 @@ exec1 conf = do
                let
                  finalizeLoad readValue = do next; assign' (#state % #stack) (readValue:xs)
@@ -66,31 +67,22 @@ index e045196d..0150d64d 100644
                    ensureGas g_callstipend $ do
                      let storage_cost
                            | (currentVal == newVal) = g_sload
-@@ -1601,7 +1611,7 @@ finalize :: VMOps t => EVM t ()
- finalize = do
-   let
-     revertContracts  = use (#tx % #txReversion) >>= assign (#env % #contracts)
--    revertSubstate   = assign (#tx % #subState) (SubState mempty mempty mempty mempty mempty mempty)
-+    revertSubstate   = assign (#tx % #subState) (SubState mempty mempty mempty mempty mempty mempty False mempty mempty)
- 
-   addAliasConstraints
-   use #result >>= \case
 @@ -1854,6 +1864,19 @@ accessStorageForGas addr key = do
    unless accessed $ assign (#tx % #subState % #accessedStorageKeys) (insert (addr, key) accessedStrkeys)
    pure accessed
  
 +recordStorageRead :: Expr EAddr -> W256 -> EVM t ()
 +recordStorageRead addr key = do
-+  rec <- use (#tx % #subState % #recordingStorageAccesses)
++  rec <- use (#tx % #recordingStorageAccesses)
 +  when rec $
-+    modifying (#tx % #subState % #recordedStorageReads) ((addr, key) :)
++    modifying (#tx % #recordedStorageReads) ((addr, key) :)
 +
 +recordStorageWrite :: Expr EAddr -> W256 -> EVM t ()
 +recordStorageWrite addr key = do
-+  rec <- use (#tx % #subState % #recordingStorageAccesses)
++  rec <- use (#tx % #recordingStorageAccesses)
 +  when rec $ do
-+    modifying (#tx % #subState % #recordedStorageWrites) ((addr, key) :)
-+    modifying (#tx % #subState % #recordedStorageReads) ((addr, key) :)
++    modifying (#tx % #recordedStorageWrites) ((addr, key) :)
++    modifying (#tx % #recordedStorageReads) ((addr, key) :)
 +
  -- * Cheat codes
  
@@ -120,17 +112,17 @@ index e045196d..0150d64d 100644
  
 +  , action "record()" $
 +      \_ _ -> do
-+        assign (#tx % #subState % #recordingStorageAccesses) True
-+        assign (#tx % #subState % #recordedStorageReads) []
-+        assign (#tx % #subState % #recordedStorageWrites) []
++        assign (#tx % #recordingStorageAccesses) True
++        assign (#tx % #recordedStorageReads) []
++        assign (#tx % #recordedStorageWrites) []
 +        doStop
 +
 +  , action "accesses(address)" $
 +      \sig input -> case decodeStaticArgs 0 1 input of
 +        [a] -> case wordToAddr a of
 +          Just a'@(LitAddr _) -> do
-+            ss <- use (#tx % #subState)
-+            if not ss.recordingStorageAccesses
++            tx <- use #tx
++            if not tx.recordingStorageAccesses
 +              then frameReturn $ AbiTuple $ V.fromList
 +                [ AbiArrayDynamic (AbiBytesType 32) V.empty
 +                , AbiArrayDynamic (AbiBytesType 32) V.empty
@@ -139,13 +131,13 @@ index e045196d..0150d64d 100644
 +                let readsSlots =
 +                      uniqPreserveOrder
 +                        [ slot
-+                        | (addrExpr, slot) <- reverse ss.recordedStorageReads
++                        | (addrExpr, slot) <- reverse tx.recordedStorageReads
 +                        , addrExpr == a'
 +                        ]
 +                    writeSlots =
 +                      uniqPreserveOrder
 +                        [ slot
-+                        | (addrExpr, slot) <- reverse ss.recordedStorageWrites
++                        | (addrExpr, slot) <- reverse tx.recordedStorageWrites
 +                        , addrExpr == a'
 +                        ]
 +                    toBytes32 w = AbiBytes 32 (word256Bytes w)
@@ -364,13 +356,13 @@ diff --git a/src/EVM/Types.hs b/src/EVM/Types.hs
 index c17d6192..04a7d7f2 100644
 --- a/src/EVM/Types.hs
 +++ b/src/EVM/Types.hs
-@@ -812,6 +812,9 @@ data SubState = SubState
-   , accessedStorageKeys :: Set (Expr EAddr, W256)
-   , refunds             :: [(Expr EAddr, Word64)]
-   , createdContracts    :: Set (Expr EAddr)
+@@ -860,6 +860,9 @@ data TxState = TxState
+   , subState    :: SubState
+   , isCreate    :: Bool
+   , txReversion :: Map (Expr EAddr) Contract
+   , txdataFloorGas :: Word64
 +  , recordingStorageAccesses :: Bool
 +  , recordedStorageReads     :: [(Expr EAddr, W256)]
 +  , recordedStorageWrites    :: [(Expr EAddr, W256)]
-   -- in principle we should include logs here, but do not for now
    }
-   deriving (Eq, Ord, Show)
+   deriving (Show)
