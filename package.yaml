@@ -93,12 +93,14 @@ executables:
     main: Main.hs
     source-dirs: src/
     dependencies:
+      - ansi-terminal
       - bytestring
       - code-page
       - echidna
       - filepath
       - hashable
       - optparse-applicative
+      - strip-ansi-escape
       - time
       - with-utf8
     ghc-options:
