@@ -24,6 +24,7 @@ import Echidna.MCP
   , streamableTestArtifact
   , streamableWorkerPayload
   , streamableResourcesList
+  , streamableDecodeUriComponent
   )
 import Echidna.Types.Config (MCPConf(..), defaultMCPConf)
 import Echidna.Types.Test (EchidnaTest(..), TestState(..), TestType(..), TestValue(..))
@@ -175,6 +176,8 @@ streamableResourceTests = testGroup "streamableResourcesList"
   [ testCase "advertises single reproducer snapshots" $
       assertBool "missing single reproducer URI template" $
         T.pack "echidna://run/reproducer/<test-key>" `elem` resourceUris streamableResourcesList
+  , testCase "decodes encoded reproducer resource keys" $
+      streamableDecodeUriComponent "test%3A0%3Aassertion" @?= "test:0:assertion"
   ]
 
 streamablePayloadBoundTests :: TestTree

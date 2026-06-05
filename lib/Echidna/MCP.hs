@@ -28,7 +28,7 @@ import qualified Data.Map as Map
 import Text.Read (readMaybe)
 import System.Directory (getCurrentDirectory)
 import System.Timeout (timeout)
-import Data.Char (isSpace, toLower)
+import Data.Char (digitToInt, isHexDigit, isSpace, toLower)
 import Data.String (fromString)
 
 import MCP.Server
@@ -825,7 +825,7 @@ readStreamableResource env workerRefs st uri =
     ("echidna://run/reproducers", query) -> streamableReproducers env query
     ("echidna://coverage/lines", _) -> streamableCoverageLines env
     (path, _) | "echidna://run/reproducer/" `T.isPrefixOf` path ->
-      streamableReproducer env (Map.singleton "testKey" (T.drop (T.length "echidna://run/reproducer/") path))
+      streamableReproducer env (Map.singleton "testKey" (streamableDecodeUriComponent $ T.drop (T.length "echidna://run/reproducer/") path))
     _ -> pure $ object ["error" .= ("unknown resource" :: Text)]
 
 streamableStatus :: Env -> [IORef WorkerState] -> StreamableMCPState -> IO Value
@@ -1135,6 +1135,15 @@ streamableParseQuery qs =
         (k:v:_) -> (k, v)
         (k:_) -> (k, "")
         _ -> ("", "")
+
+streamableDecodeUriComponent :: Text -> Text
+streamableDecodeUriComponent = T.pack . go . T.unpack
+  where
+    go ('%':a:b:rest)
+      | isHexDigit a && isHexDigit b =
+          toEnum (digitToInt a * 16 + digitToInt b) : go rest
+    go (c:rest) = c : go rest
+    go [] = []
 
 streamableFormatTimestamp :: LocalTime -> Text
 streamableFormatTimestamp = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S"
