@@ -26,6 +26,8 @@ seqLen: 100
 shrinkLimit: 5000
 #coverage controls coverage guided testing
 coverage: true
+#whether to save per-line coverage hit counts
+coverageLineHits: true
 #format can be "text" or "json" for different output (human or machine readable)
 #default is interactive if running on an interactive tty or text mode if not
 format: null
@@ -104,6 +106,22 @@ workers: null
 allEvents: false
 # events server port
 server: null
+# MCP server configuration
+mcp:
+  enabled: false
+  transport: "http"
+  host: "127.0.0.1"
+  port: 9001
+  socketPath: "/tmp/echidna.mcp.sock"
+  maxEvents: 5000
+  maxReverts: 1000
+  maxTxs: 1000
+  maxReproducerArtifacts: 5000
+  maxReproducerTxs: 128
+  reproducerEventsLimit: 500
+  reproducerResultTTLMinutes: 120
+  includeCallData: false
+  maxReproducerJsonBytes: 256000
 # whether to add an additional symbolic execution worker
 symExec: false
 # number of SMT solvers used in symbolic execution
