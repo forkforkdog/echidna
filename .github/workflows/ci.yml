@@ -26,8 +26,6 @@ jobs:
           - os: ubuntu-latest
             shell: bash
             container: "{\"image\": \"elopeztob/alpine-haskell-stack-echidna:ghc-9.8.4\", \"options\": \"--user 1001\"}"
-          - os: macos-15-intel # x86_64 macOS
-            shell: bash
 
     defaults:
       run:
