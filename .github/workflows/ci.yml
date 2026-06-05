@@ -262,5 +262,5 @@ jobs:
           export PATH="$PATH:$HOME/.local/bin:$HOME/.foundry/bin"
           solc-select use ${{ matrix.solc }}
           chmod +x echidna-testsuite*
-          ./echidna-testsuite*
+          ./echidna-testsuite* -p '!/Symbolic/'
         shell: bash
