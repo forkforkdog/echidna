@@ -1,5 +1,5 @@
 diff --git a/src/EVM.hs b/src/EVM.hs
-index e045196d..1db06791 100644
+index e045196d..0150d64d 100644
 --- a/src/EVM.hs
 +++ b/src/EVM.hs
 @@ -29,7 +29,7 @@ import EVM.Effects (Config (..))
@@ -161,7 +161,7 @@ index e045196d..1db06791 100644
    , action "store(address,bytes32,bytes32)" $
        \sig input -> case decodeStaticArgs 0 3 input of
          [a, slot, new] -> case wordToAddr a of
-@@ -2217,6 +2292,193 @@ cheatActions = Map.fromList
+@@ -2217,6 +2292,198 @@ cheatActions = Map.fromList
    ]
    where
      action s f = (abiKeccak s, f (abiKeccak s))
@@ -346,6 +346,11 @@ index e045196d..1db06791 100644
 +        query $ PleaseGetSols expr numBytes constraints $ \sols -> do
 +          assign #result Nothing
 +          nested' <- lift $ execStateT (k sols) nested
++          runNestedVM nested' cont
++      PleaseReadEnv var k ->
++        query $ PleaseReadEnv var $ \val -> do
++          assign #result Nothing
++          nested' <- lift $ execStateT (k val) nested
 +          runNestedVM nested' cont
 +      PleaseDoFFI cmd env k ->
 +        query $ PleaseDoFFI cmd env $ \bs -> do
