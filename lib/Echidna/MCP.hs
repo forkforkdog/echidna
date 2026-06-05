@@ -761,6 +761,7 @@ streamableResourcesList = object
       [ streamableResource "echidna://run/status" "Run status"
       , streamableResource "echidna://run/events" "Events"
       , streamableResource "echidna://run/reproducers" "Reproducer snapshots"
+      , streamableResource "echidna://run/reproducer/<test-key>" "Single reproducer snapshot"
       , streamableResource "echidna://coverage/lines" "Coverage line hits"
       ]
   ]

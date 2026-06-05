@@ -143,8 +143,11 @@ instance FromJSON EConfigWithUsage where
             <*> mcpObj .:? "port" .!= defaultMCPConf.port
             <*> mcpObj .:? "socketPath" .!= defaultMCPConf.socketPath
             <*> mcpObj .:? "maxEvents" .!= defaultMCPConf.maxEvents
+            <*> mcpObj .:? "maxReverts" .!= defaultMCPConf.maxReverts
+            <*> mcpObj .:? "maxTxs" .!= defaultMCPConf.maxTxs
             <*> ((<|>) <$> mcpObj .:? "reproducerArtifactsLimit" <*> mcpObj .:? "maxReproducerArtifacts") .!= defaultMCPConf.maxReproducerArtifacts
             <*> mcpObj .:? "maxReproducerTxs" .!= defaultMCPConf.maxReproducerTxs
+            <*> mcpObj .:? "reproducerEventsLimit" .!= defaultMCPConf.reproducerEventsLimit
             <*> mcpObj .:? "reproducerResultTTLMinutes" .!= defaultMCPConf.reproducerResultTTLMinutes
             <*> mcpObj .:? "includeCallData" .!= defaultMCPConf.includeCallData
             <*> mcpObj .:? "maxReproducerJsonBytes" .!= defaultMCPConf.maxReproducerJsonBytes

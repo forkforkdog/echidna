@@ -45,8 +45,11 @@ data MCPConf = MCPConf
   , port       :: Int
   , socketPath :: FilePath
   , maxEvents  :: Int
+  , maxReverts :: Int
+  , maxTxs     :: Int
   , maxReproducerArtifacts :: Int
   , maxReproducerTxs      :: Int
+  , reproducerEventsLimit  :: Int
   , reproducerResultTTLMinutes :: Int
   , includeCallData        :: Bool
   , maxReproducerJsonBytes :: Int
@@ -60,8 +63,11 @@ defaultMCPConf = MCPConf
   , port = 9001
   , socketPath = "/tmp/echidna.mcp.sock"
   , maxEvents = 5000
+  , maxReverts = 1000
+  , maxTxs = 1000
   , maxReproducerArtifacts = 5000
   , maxReproducerTxs = 128
+  , reproducerEventsLimit = 500
   , reproducerResultTTLMinutes = 120
   , includeCallData = False
   , maxReproducerJsonBytes = 256000

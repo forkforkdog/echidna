@@ -6,11 +6,11 @@ import Data.Maybe (isJust, isNothing)
 import Data.Yaml qualified as Y
 import Optics.Core (sans)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, assertBool, assertFailure)
+import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 
 import Echidna.Config (defaultConfig, parseConfig)
 import Echidna.Types.Campaign (CampaignConf(..))
-import Echidna.Types.Config (EConfigWithUsage(..), EConfig(..))
+import Echidna.Types.Config (EConfigWithUsage(..), EConfig(..), MCPConf(..))
 import Echidna.Types.Tx (TxConf(..))
 
 configTests :: TestTree
@@ -39,6 +39,32 @@ configTests = testGroup "Configuration tests" $
       assertBool "" $ isNothing (defaultConfig.campaignConf.corpusDir)
   , testCase "coverageDir defaults to Nothing" $
       assertBool "" $ isNothing (defaultConfig.campaignConf.coverageDir)
+  , testCase "parse mcp bounds" $ do
+      let yaml = "mcp:\n\
+                 \  enabled: true\n\
+                 \  maxEvents: 11\n\
+                 \  maxReverts: 12\n\
+                 \  maxTxs: 13\n\
+                 \  maxReproducerArtifacts: 14\n\
+                 \  maxReproducerTxs: 15\n\
+                 \  reproducerEventsLimit: 16\n\
+                 \  reproducerResultTTLMinutes: 17\n\
+                 \  includeCallData: true\n\
+                 \  maxReproducerJsonBytes: 18\n"
+      case Y.decodeEither' yaml of
+        Right (c :: EConfigWithUsage) -> do
+          let mcpConf = c.econfig.mcpConf
+          assertBool "mcp should be enabled" mcpConf.enabled
+          assertEqual "maxEvents" 11 mcpConf.maxEvents
+          assertEqual "maxReverts" 12 mcpConf.maxReverts
+          assertEqual "maxTxs" 13 mcpConf.maxTxs
+          assertEqual "maxReproducerArtifacts" 14 mcpConf.maxReproducerArtifacts
+          assertEqual "maxReproducerTxs" 15 mcpConf.maxReproducerTxs
+          assertEqual "reproducerEventsLimit" 16 mcpConf.reproducerEventsLimit
+          assertEqual "reproducerResultTTLMinutes" 17 mcpConf.reproducerResultTTLMinutes
+          assertBool "includeCallData should be enabled" mcpConf.includeCallData
+          assertEqual "maxReproducerJsonBytes" 18 mcpConf.maxReproducerJsonBytes
+        Left e -> assertFailure $ "unexpected decoding error: " <> show e
   , testCase "default.yaml" $ do
       EConfigWithUsage _ bad unset <- parseConfig "basic/default.yaml"
       assertBool ("unused options: " ++ show bad) $ null bad

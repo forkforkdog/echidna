@@ -151,9 +151,12 @@ data Options = Options
   , cliMcpPort         :: Maybe Int
   , cliMcpSocket       :: Maybe FilePath
   , cliMcpMaxEvents    :: Maybe Int
+  , cliMcpMaxReverts   :: Maybe Int
+  , cliMcpMaxTxs       :: Maybe Int
   , cliMcpMaxReproducerArtifacts :: Maybe Int
   , cliMcpReproducerArtifactsLimit :: Maybe Int
   , cliMcpMaxReproducerTxs      :: Maybe Int
+  , cliMcpReproducerEventsLimit :: Maybe Int
   , cliMcpReproducerResultTTLMinutes :: Maybe Int
   , cliMcpIncludeCallData :: Maybe Bool
   , cliMcpMaxReproducerJsonBytes :: Maybe Int
@@ -241,6 +244,12 @@ options = Options . NE.fromList
   <*> optional (option auto $ long "mcp-max-events"
     <> metavar "N"
     <> help "MCP ring buffer size for events.")
+  <*> optional (option auto $ long "mcp-max-reverts"
+    <> metavar "N"
+    <> help "MCP ring buffer size for reverts.")
+  <*> optional (option auto $ long "mcp-max-txs"
+    <> metavar "N"
+    <> help "MCP ring buffer size for transactions.")
   <*> optional (option auto $ long "mcp-max-reproducer-artifacts"
     <> metavar "N"
     <> help "MCP maximum reproducer artifacts to retain.")
@@ -250,6 +259,9 @@ options = Options . NE.fromList
   <*> optional (option auto $ long "mcp-max-reproducer-txs"
     <> metavar "N"
     <> help "Maximum transactions returned per reproducer.")
+  <*> optional (option auto $ long "mcp-reproducer-events-limit"
+    <> metavar "N"
+    <> help "MCP reproducer event ring buffer size.")
   <*> optional (option auto $ long "mcp-reproducer-result-ttl-minutes"
     <> metavar "N"
     <> help "TTL minutes for MCP reproducer artifacts.")
@@ -372,10 +384,13 @@ overrideConfig config Options{..} = do
       , port = fromMaybe mcpConf.port cliMcpPort
       , socketPath = fromMaybe mcpConf.socketPath cliMcpSocket
       , maxEvents = fromMaybe mcpConf.maxEvents cliMcpMaxEvents
+      , maxReverts = fromMaybe mcpConf.maxReverts cliMcpMaxReverts
+      , maxTxs = fromMaybe mcpConf.maxTxs cliMcpMaxTxs
       , maxReproducerArtifacts = fromMaybe
           (fromMaybe mcpConf.maxReproducerArtifacts cliMcpMaxReproducerArtifacts)
           (cliMcpReproducerArtifactsLimit <|> cliMcpMaxReproducerArtifacts)
       , maxReproducerTxs = fromMaybe mcpConf.maxReproducerTxs cliMcpMaxReproducerTxs
+      , reproducerEventsLimit = fromMaybe mcpConf.reproducerEventsLimit cliMcpReproducerEventsLimit
       , reproducerResultTTLMinutes = fromMaybe mcpConf.reproducerResultTTLMinutes cliMcpReproducerResultTTLMinutes
       , includeCallData = fromMaybe mcpConf.includeCallData cliMcpIncludeCallData
       , maxReproducerJsonBytes = fromMaybe mcpConf.maxReproducerJsonBytes cliMcpMaxReproducerJsonBytes

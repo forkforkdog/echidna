@@ -1,6 +1,10 @@
 module Tests.MCPParse (mcpParseTests) where
 
-import Data.Maybe (isNothing)
+import Data.Aeson (Value(..))
+import Data.Aeson.Key qualified as K
+import Data.Aeson.KeyMap qualified as KM
+import Data.Maybe (isNothing, mapMaybe)
+import Data.Text qualified as T
 import Data.Vector qualified as Vector
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -16,6 +20,7 @@ import Echidna.MCP
   , parseFuzzSequence
   , parsePrimitive
   , splitArgs
+  , streamableResourcesList
   )
 
 uint :: Integer -> AbiValue
@@ -38,6 +43,7 @@ mcpParseTests = testGroup "MCP parsing"
   , fuzzSequenceTests
   , callTests
   , splitArgsTests
+  , streamableResourceTests
   ]
 
 primitiveTests :: TestTree
@@ -155,3 +161,24 @@ splitArgsTests = testGroup "splitArgs"
   , testCase "single token (no commas)" $
       splitArgs "a" @?= ["a"]
   ]
+
+streamableResourceTests :: TestTree
+streamableResourceTests = testGroup "streamableResourcesList"
+  [ testCase "advertises single reproducer snapshots" $
+      assertBool "missing single reproducer URI template" $
+        T.pack "echidna://run/reproducer/<test-key>" `elem` resourceUris streamableResourcesList
+  ]
+
+resourceUris :: Value -> [T.Text]
+resourceUris (Object o) =
+  case KM.lookup (K.fromText $ T.pack "resources") o of
+    Just (Array xs) -> mapMaybe resourceUri (Vector.toList xs)
+    _ -> []
+resourceUris _ = []
+
+resourceUri :: Value -> Maybe T.Text
+resourceUri (Object o) =
+  case KM.lookup (K.fromText $ T.pack "uri") o of
+    Just (String uri) -> Just uri
+    _ -> Nothing
+resourceUri _ = Nothing
