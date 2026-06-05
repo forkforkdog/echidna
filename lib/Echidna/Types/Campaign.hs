@@ -25,7 +25,7 @@ maxRecentReverts :: Int
 maxRecentReverts = 5
 
 -- | Per-function sampling state. Updated on the fuzzer hot path so all
--- fields must be strict (see GA's MCP postmortem on thunk retention).
+-- fields must be strict to avoid retaining sampled call histories.
 data SampleStats = SampleStats
   { sampleCalls         :: !Int
     -- ^ Total calls observed.
