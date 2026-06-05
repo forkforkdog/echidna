@@ -1,8 +1,9 @@
 module Tests.MCPParse (mcpParseTests) where
 
-import Data.Aeson (Value(..))
+import Data.Aeson (Value(..), encode)
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (isNothing, mapMaybe)
 import Data.Text qualified as T
 import Data.Vector qualified as Vector
@@ -20,8 +21,14 @@ import Echidna.MCP
   , parseFuzzSequence
   , parsePrimitive
   , splitArgs
+  , streamableTestArtifact
+  , streamableWorkerPayload
   , streamableResourcesList
   )
+import Echidna.Types.Config (MCPConf(..), defaultMCPConf)
+import Echidna.Types.Test (EchidnaTest(..), TestState(..), TestType(..), TestValue(..))
+import Echidna.Types.Tx (Tx(..), TxCall(..), TxResult(..))
+import Echidna.Types.Worker qualified as Worker
 
 uint :: Integer -> AbiValue
 uint = AbiUInt 256 . fromInteger
@@ -44,6 +51,7 @@ mcpParseTests = testGroup "MCP parsing"
   , callTests
   , splitArgsTests
   , streamableResourceTests
+  , streamablePayloadBoundTests
   ]
 
 primitiveTests :: TestTree
@@ -169,6 +177,44 @@ streamableResourceTests = testGroup "streamableResourcesList"
         T.pack "echidna://run/reproducer/<test-key>" `elem` resourceUris streamableResourcesList
   ]
 
+streamablePayloadBoundTests :: TestTree
+streamablePayloadBoundTests = testGroup "streamable payload bounds"
+  [ testCase "snapshot trims reproducer transaction count" $ do
+      let conf = defaultMCPConf { maxReproducerTxs = 3, maxReproducerJsonBytes = 0, includeCallData = True }
+          artifact = streamableTestArtifact conf 0 (mkStreamableTest 10)
+      objectArrayLength ["reproducer", "best"] artifact @?= Just 3
+      objectBool ["reproducer", "truncated"] artifact @?= Just True
+  , testCase "event payload uses event reproducer limit" $ do
+      let conf = defaultMCPConf { reproducerEventsLimit = 2, maxReproducerJsonBytes = 0, includeCallData = True }
+          payload = streamableWorkerPayload conf (Worker.TestFalsified (mkStreamableTest 10))
+      objectArrayLength ["reproducer"] payload @?= Just 2
+      objectBool ["truncated"] payload @?= Just True
+  , testCase "snapshot respects JSON byte budget" $ do
+      let test = mkStreamableTest 10
+          loose = defaultMCPConf { maxReproducerTxs = 10, maxReproducerJsonBytes = 0, includeCallData = True }
+          bounded = defaultMCPConf { maxReproducerTxs = 10, maxReproducerJsonBytes = 1200, includeCallData = True }
+          looseBytes = LBS.length . encode $ streamableTestArtifact loose 0 test
+          artifact = streamableTestArtifact bounded 0 test
+          boundedBytes = LBS.length (encode artifact)
+      assertBool "expected bounded payload to be smaller" (boundedBytes < looseBytes)
+      assertBool "expected bounded payload to fit configured budget" (boundedBytes <= 1200)
+      objectBool ["reproducer", "truncated"] artifact @?= Just True
+  ]
+
+mkStreamableTest :: Int -> EchidnaTest
+mkStreamableTest txCount = EchidnaTest
+  { state = Large 0
+  , testType = PropertyTest "echidna_prop" 0
+  , value = NoValue
+  , reproducer = replicate txCount sampleTx
+  , result = ReturnFalse
+  , vm = Nothing
+  , workerId = Just 1
+  }
+
+sampleTx :: Tx
+sampleTx = Tx (SolCall ("foo", [uint 1])) 1 2 3 4 5 (6, 7)
+
 resourceUris :: Value -> [T.Text]
 resourceUris (Object o) =
   case KM.lookup (K.fromText $ T.pack "resources") o of
@@ -182,3 +228,15 @@ resourceUri (Object o) =
     Just (String uri) -> Just uri
     _ -> Nothing
 resourceUri _ = Nothing
+
+objectArrayLength :: [T.Text] -> Value -> Maybe Int
+objectArrayLength [] (Array xs) = Just (Vector.length xs)
+objectArrayLength (key:keys) (Object o) =
+  KM.lookup (K.fromText key) o >>= objectArrayLength keys
+objectArrayLength _ _ = Nothing
+
+objectBool :: [T.Text] -> Value -> Maybe Bool
+objectBool [] (Bool b) = Just b
+objectBool (key:keys) (Object o) =
+  KM.lookup (K.fromText key) o >>= objectBool keys
+objectBool _ _ = Nothing

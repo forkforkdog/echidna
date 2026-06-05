@@ -658,13 +658,13 @@ runStreamableMCPServer :: Env -> [IORef WorkerState] -> IO ()
 runStreamableMCPServer env workerRefs = do
   started <- getCurrentTime
   eventsRef <- newIORef (StreamableEventBuffer 0 [])
-  let st = StreamableMCPState eventsRef started (max 1 env.cfg.mcpConf.maxEvents)
+  let conf = env.cfg.mcpConf
+      st = StreamableMCPState eventsRef started (max 1 conf.maxEvents)
   ch <- dupChan env.eventQueue
   _ <- forkIO $ forever $ do
     (ts, ev) <- readChan ch
-    recordStreamableEvent st ts ev
-  let conf = env.cfg.mcpConf
-      settings = setPort conf.port . setHost (fromString $ T.unpack conf.host) $ defaultSettings
+    recordStreamableEvent conf st ts ev
+  let settings = setPort conf.port . setHost (fromString $ T.unpack conf.host) $ defaultSettings
   runSettings settings (streamableMCPApp env workerRefs st)
 
 streamableMCPApp :: Env -> [IORef WorkerState] -> StreamableMCPState -> Application
@@ -861,15 +861,17 @@ streamableEvents :: StreamableMCPState -> Map Text Text -> IO Value
 streamableEvents st query = do
   StreamableEventBuffer _ items <- readIORef st.streamableEventsRef
   let since = streamableReadQueryInt "since" (-1) query
-      limit = streamableReadQueryInt "limit" 200 query
+      limit = min st.streamableMaxEvents . max 0 $ streamableReadQueryInt "limit" 200 query
       selected = take limit [ev | (i, ev) <- items, i > since]
   pure $ object ["events" .= selected]
 
 streamableReproducers :: Env -> Map Text Text -> IO Value
 streamableReproducers env query = do
   tests <- mapM readIORef env.testRefs
-  let offset = streamableReadQueryInt "offset" 0 query
-      limit = streamableReadQueryInt "limit" env.cfg.mcpConf.maxReproducerArtifacts query
+  let offset = max 0 $ streamableReadQueryInt "offset" 0 query
+      maxArtifacts = max 0 env.cfg.mcpConf.maxReproducerArtifacts
+      requestedLimit = streamableReadQueryInt "limit" maxArtifacts query
+      limit = min maxArtifacts (max 0 requestedLimit)
       artifacts = filter streamableArtifactHasReproducer (zipWith (streamableTestArtifact env.cfg.mcpConf) [0..] tests)
       selected = take limit (drop offset artifacts)
   pure $ object
@@ -896,30 +898,78 @@ streamableCoverageLines env = do
 
 streamableTestArtifact :: MCPConf -> Int -> EchidnaTest -> Value
 streamableTestArtifact conf idx test =
-  let txs = streamableShapeTxs conf test.reproducer
+  let originalLength = length test.reproducer
+      shaped = streamableShapeTxs conf test.reproducer
+      countTruncated = length shaped < originalLength
       key = T.intercalate ":" ["test", T.pack (show idx), streamableRenderTestType test.testType]
       testId = streamableRenderTestId test
-  in object
-    [ "testKey" .= key
-    , "testId" .= testId
-    , "workerId" .= test.workerId
-    , "testType" .= streamableRenderTestType test.testType
-    , "state" .= streamableRenderTestState test.state
-    , "reproducer" .= object
-        [ "latest" .= txs
-        , "best" .= txs
-        , "candidate" .= txs
-        , "length" .= object
-            [ "latest" .= length txs
-            , "best" .= length txs
-            , "candidate" .= length txs
-            ]
-        ]
-    , "shrink" .= object
-        [ "status" .= streamableShrinkStatus test.state
-        , "fullyShrunk" .= streamableFullyShrunk test.state
-        ]
-    ]
+      mkArtifact artifactTxs artifactBytesTruncated =
+        let truncated = countTruncated || artifactBytesTruncated || length artifactTxs < length shaped
+        in object
+          [ "testKey" .= key
+          , "testId" .= testId
+          , "workerId" .= test.workerId
+          , "testType" .= streamableRenderTestType test.testType
+          , "state" .= streamableRenderTestState test.state
+          , "reproducer" .= object
+              [ "latest" .= artifactTxs
+              , "best" .= artifactTxs
+              , "candidate" .= artifactTxs
+              , "length" .= object
+                  [ "latest" .= length artifactTxs
+                  , "best" .= length artifactTxs
+                  , "candidate" .= length artifactTxs
+                  ]
+              , "originalLength" .= originalLength
+              , "returnedLength" .= length artifactTxs
+              , "truncated" .= truncated
+              , "maxJsonBytes" .= conf.maxReproducerJsonBytes
+              ]
+          , "shrink" .= object
+              [ "status" .= streamableShrinkStatus test.state
+              , "fullyShrunk" .= streamableFullyShrunk test.state
+              ]
+          ]
+      (txs, bytesTruncated) = streamableBoundTxsByJsonBytes conf mkArtifact shaped
+  in mkArtifact txs bytesTruncated
+
+streamableBoundTxsByJsonBytes :: MCPConf -> ([Tx] -> Bool -> Value) -> [Tx] -> ([Tx], Bool)
+streamableBoundTxsByJsonBytes conf mkValue txs
+  | conf.maxReproducerJsonBytes <= 0 = (txs, False)
+  | withinBudget txs False = (txs, False)
+  | otherwise = shrink txs
+  where
+    maxBytes = fromIntegral conf.maxReproducerJsonBytes
+    withinBudget xs truncated = BL8.length (encode (mkValue xs truncated)) <= maxBytes
+    shrink [] = ([], True)
+    shrink xs =
+      let xs' = init xs
+      in if null xs' || withinBudget xs' True
+           then (xs', True)
+           else shrink xs'
+
+streamableEventTestPayload :: MCPConf -> EchidnaTest -> Value
+streamableEventTestPayload conf test =
+  let originalLength = length test.reproducer
+      shaped = streamableShapeTxsLimit conf conf.reproducerEventsLimit test.reproducer
+      countTruncated = length shaped < originalLength
+      mkPayload payloadTxs payloadBytesTruncated =
+        let truncated = countTruncated || payloadBytesTruncated || length payloadTxs < length shaped
+        in object
+          [ "state" .= test.state
+          , "type" .= test.testType
+          , "value" .= test.value
+          , "reproducer" .= payloadTxs
+          , "result" .= test.result
+          , "reproducerLength" .= object
+              [ "original" .= originalLength
+              , "returned" .= length payloadTxs
+              ]
+          , "truncated" .= truncated
+          , "maxJsonBytes" .= conf.maxReproducerJsonBytes
+          ]
+      (txs, bytesTruncated) = streamableBoundTxsByJsonBytes conf mkPayload shaped
+  in mkPayload txs bytesTruncated
 
 streamableArtifactHasReproducer :: Value -> Bool
 streamableArtifactHasReproducer = \case
@@ -933,8 +983,11 @@ streamableArtifactHasReproducer = \case
   _ -> False
 
 streamableShapeTxs :: MCPConf -> [Tx] -> [Tx]
-streamableShapeTxs conf =
-  let trimTxs = if conf.maxReproducerTxs <= 0 then id else take conf.maxReproducerTxs
+streamableShapeTxs conf = streamableShapeTxsLimit conf conf.maxReproducerTxs
+
+streamableShapeTxsLimit :: MCPConf -> Int -> [Tx] -> [Tx]
+streamableShapeTxsLimit conf txLimit =
+  let trimTxs = if txLimit <= 0 then id else take txLimit
       redact tx = if conf.includeCallData then tx else tx { call = NoCall }
   in map redact . trimTxs
 
@@ -984,12 +1037,12 @@ streamableObjectText key = \case
     _ -> Nothing
   _ -> Nothing
 
-recordStreamableEvent :: StreamableMCPState -> LocalTime -> Worker.CampaignEvent -> IO ()
-recordStreamableEvent st ts ev = do
+recordStreamableEvent :: MCPConf -> StreamableMCPState -> LocalTime -> Worker.CampaignEvent -> IO ()
+recordStreamableEvent conf st ts ev = do
   let (wid, wtype, etype, payload) =
         case ev of
           Worker.WorkerEvent wid' wtype' e ->
-            (Just wid', Just (streamableWorkerTypeText wtype'), streamableWorkerEventType e, streamableWorkerPayload e)
+            (Just wid', Just (streamableWorkerTypeText wtype'), streamableWorkerEventType e, streamableWorkerPayload conf e)
           Worker.Failure msg ->
             (Nothing, Nothing, "Failure", toJSON msg)
           Worker.ReproducerSaved f ->
@@ -1021,10 +1074,10 @@ streamableWorkerEventType = \case
   Worker.TxSequenceReplayFailed {} -> "TxSequenceReplayFailed"
   Worker.WorkerStopped {} -> "WorkerStopped"
 
-streamableWorkerPayload :: Worker.WorkerEvent -> Value
-streamableWorkerPayload = \case
-  Worker.TestFalsified test -> toJSON test
-  Worker.TestOptimized test -> toJSON test
+streamableWorkerPayload :: MCPConf -> Worker.WorkerEvent -> Value
+streamableWorkerPayload conf = \case
+  Worker.TestFalsified test -> streamableEventTestPayload conf test
+  Worker.TestOptimized test -> streamableEventTestPayload conf test
   Worker.NewCoverage points numCodehashes corpusSize transactions -> object
     [ "coverage" .= points
     , "contracts" .= numCodehashes
