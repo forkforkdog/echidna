@@ -1,11 +1,13 @@
 module Echidna.Types.Config where
 
 import Control.Concurrent (Chan)
+import Data.Aeson (FromJSON(..), withText)
 import Data.Aeson.Key (Key)
 import Data.IORef (IORef)
 import Data.Set (Set)
 import Echidna.Types.InterWorker (Bus)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time (LocalTime)
 import Data.Word (Word64)
 
@@ -25,6 +27,45 @@ import Echidna.Types.Test (TestConf, EchidnaTest)
 import Echidna.Types.Tx (TxConf)
 import Echidna.Types.Worker (CampaignEvent)
 import Echidna.Types.World (World)
+
+data MCPTransport = MCPHttp | MCPUnix | MCPStdio deriving (Show, Eq)
+
+instance FromJSON MCPTransport where
+  parseJSON = withText "MCPTransport" $ \t ->
+    case T.toLower t of
+      "http" -> pure MCPHttp
+      "unix" -> pure MCPUnix
+      "stdio" -> pure MCPStdio
+      _ -> fail "invalid mcp.transport (expected http|unix|stdio)"
+
+data MCPConf = MCPConf
+  { enabled    :: Bool
+  , transport  :: MCPTransport
+  , host       :: Text
+  , port       :: Int
+  , socketPath :: FilePath
+  , maxEvents  :: Int
+  , maxReproducerArtifacts :: Int
+  , maxReproducerTxs      :: Int
+  , reproducerResultTTLMinutes :: Int
+  , includeCallData        :: Bool
+  , maxReproducerJsonBytes :: Int
+  } deriving (Show, Eq)
+
+defaultMCPConf :: MCPConf
+defaultMCPConf = MCPConf
+  { enabled = False
+  , transport = MCPHttp
+  , host = "127.0.0.1"
+  , port = 9001
+  , socketPath = "/tmp/echidna.mcp.sock"
+  , maxEvents = 5000
+  , maxReproducerArtifacts = 5000
+  , maxReproducerTxs = 128
+  , reproducerResultTTLMinutes = 120
+  , includeCallData = False
+  , maxReproducerJsonBytes = 256000
+  }
 
 data OperationMode = Interactive | NonInteractive OutputFormat deriving (Show, Eq)
 data OutputFormat = Text | JSON | None deriving (Show, Eq)
@@ -46,6 +87,7 @@ data EConfig = EConfig
   , testConf :: TestConf
   , txConf :: TxConf
   , uiConf :: UIConf
+  , mcpConf :: MCPConf
 
   , allEvents :: Bool
   , rpcUrl :: Maybe Text

@@ -16,7 +16,7 @@ import Data.List.Split (splitPlaces)
 import Data.Map (Map)
 import Data.Maybe (mapMaybe)
 import Data.Sequence ((|>))
-import Data.Text (Text)
+import Data.Text (Text, unpack)
 import Data.Time
 import Graphics.Vty qualified as Vty
 import Graphics.Vty.Config (VtyUserConfig, defaultConfig, configInputMap)
@@ -38,7 +38,7 @@ import Echidna.Output.JSON qualified
 import Echidna.Types.Agent (runAgent)
 import Echidna.Agent.Fuzzer (FuzzerAgent(..))
 import Echidna.Agent.Symbolic (SymbolicAgent(..))
-import Echidna.MCP (runMCPServer)
+import Echidna.MCP (runStreamableMCPServer)
 import Echidna.SourceAnalysis.Slither (isEmptySlitherInfo)
 import Echidna.Types.Campaign
 import Echidna.Types.Config
@@ -121,11 +121,9 @@ ui vm dict initialCorpus cliSelectedContract = do
       uiEventsForwarderStopVar <- spawnListener forwardEvent
       workers <- spawnWorkers
 
-      case conf.campaignConf.serverPort of
-        Just port -> do
-          liftIO $ pushCampaignEvent env (ServerLog ("MCP Server running at http://127.0.0.1:" ++ show port ++ "/mcp"))
-          void $ liftIO $ forkIO $ runMCPServer env (map snd workers) (fromIntegral port)
-        Nothing -> pure ()
+      when conf.mcpConf.enabled $ do
+        liftIO $ pushCampaignEvent env (ServerLog ("MCP Server running at http://" ++ unpack conf.mcpConf.host ++ ":" ++ show conf.mcpConf.port ++ "/mcp"))
+        void $ liftIO $ forkIO $ runStreamableMCPServer env (map snd workers)
 
       ticker <- liftIO . forkIO . forever $ do
         threadDelay 200_000 -- 200 ms
@@ -221,11 +219,9 @@ ui vm dict initialCorpus cliSelectedContract = do
             putStrLn statusMsg
             hFlush stdout
 
-      case conf.campaignConf.serverPort of
-        Just port -> do
-          liftIO $ pushCampaignEvent env (ServerLog ("MCP Server running at http://127.0.0.1:" ++ show port ++ "/mcp"))
-          void $ liftIO $ forkIO $ runMCPServer env (map snd workers) (fromIntegral port)
-        Nothing -> pure ()
+      when conf.mcpConf.enabled $ do
+        liftIO $ pushCampaignEvent env (ServerLog ("MCP Server running at http://" ++ unpack conf.mcpConf.host ++ ":" ++ show conf.mcpConf.port ++ "/mcp"))
+        void $ liftIO $ forkIO $ runStreamableMCPServer env (map snd workers)
 
       ticker <- liftIO . forkIO . forever $ do
         threadDelay 3_000_000 -- 3 seconds

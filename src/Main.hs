@@ -5,7 +5,9 @@ module Main where
 import Control.Monad (unless, when, forM_)
 import Control.Monad.Random (getRandomR)
 import Control.Monad.Reader (runReaderT, liftIO)
+import Data.Aeson (encode)
 import Data.Aeson.Key qualified as Aeson.Key
+import Data.ByteString.Lazy qualified as LBS
 import Data.Char (toLower)
 import Data.Function ((&))
 import Data.Hashable (hash)
@@ -19,7 +21,7 @@ import Data.Text qualified as T
 import Data.Text.Lazy qualified as TL
 import Data.Time.Clock.System (getSystemTime, systemSeconds)
 import Data.Version (showVersion)
-import Data.Word (Word8, Word16, Word64)
+import Data.Word (Word8, Word64)
 import Main.Utf8 (withUtf8)
 import Options.Applicative
 import Paths_echidna (version)
@@ -44,6 +46,7 @@ import Echidna.Solidity (compileContracts)
 import Echidna.Test (validateTestMode)
 import Echidna.Types.Campaign
 import Echidna.Types.Config
+import Echidna.Types.Coverage (mergeCoverageMaps)
 import Echidna.Types.Solidity
 import Echidna.Types.Test (TestMode, EchidnaTest(..), TestConf(..), TestType(..), TestState(..))
 import Echidna.UI
@@ -126,18 +129,34 @@ main = withUtf8 $ withCP65001 $ do
       -- save source coverage reports
       let contracts = Map.elems env.dapp.solcByName
       saveCoverages env runId dir buildOutput.sources contracts
+      when cfg.campaignConf.coverageLineHits $ do
+        covMap <- mergeCoverageMaps env.dapp env.coverageRefInit env.coverageRefRuntime
+        let hits = coverageLineHits buildOutput.sources covMap contracts cfg.campaignConf.coverageExcludes
+        LBS.writeFile (dir </> "coverage_hits.json") (encode hits)
 
   if isSuccessful tests then exitSuccess else exitWith (ExitFailure 1)
 
 data Options = Options
   { cliFilePath         :: NE.NonEmpty FilePath
   , cliWorkers          :: Maybe Word8
-  , cliServerPort       :: Maybe Word16
   , cliSelectedContract :: Maybe Text
   , cliConfigFilepath   :: Maybe FilePath
   , cliOutputFormat     :: Maybe OutputFormat
   , cliCorpusDir        :: Maybe FilePath
   , cliCoverageDir      :: Maybe FilePath
+  , cliCoverageLineHits :: Maybe Bool
+  , cliMcpEnabled      :: Maybe Bool
+  , cliMcpTransport    :: Maybe MCPTransport
+  , cliMcpHost         :: Maybe Text
+  , cliMcpPort         :: Maybe Int
+  , cliMcpSocket       :: Maybe FilePath
+  , cliMcpMaxEvents    :: Maybe Int
+  , cliMcpMaxReproducerArtifacts :: Maybe Int
+  , cliMcpReproducerArtifactsLimit :: Maybe Int
+  , cliMcpMaxReproducerTxs      :: Maybe Int
+  , cliMcpReproducerResultTTLMinutes :: Maybe Int
+  , cliMcpIncludeCallData :: Maybe Bool
+  , cliMcpMaxReproducerJsonBytes :: Maybe Int
   , cliTestMode         :: Maybe TestMode
   , cliAllContracts     :: Bool
   , cliTimeout          :: Maybe Int
@@ -171,6 +190,14 @@ bool = maybeReader (f . map toLower) where
   f "false" = Just False
   f _ = Nothing
 
+mcpTransport :: ReadM MCPTransport
+mcpTransport = eitherReader $ \s ->
+  case map toLower s of
+    "http" -> Right MCPHttp
+    "unix" -> Right MCPUnix
+    "stdio" -> Right MCPStdio
+    _ -> Left "invalid mcp transport (expected http|unix|stdio)"
+
 options :: Parser Options
 options = Options . NE.fromList
   <$> some (argument str (metavar "FILES"
@@ -178,9 +205,6 @@ options = Options . NE.fromList
   <*> optional (option auto $ long "workers"
     <> metavar "N"
     <> help "Number of workers to run")
-  <*> optional (option auto $ long "server"
-    <> metavar "PORT"
-    <> help "Run events server on the given port")
   <*> optional (option str $ long "contract"
     <> metavar "CONTRACT"
     <> help "Contract to analyze")
@@ -196,6 +220,45 @@ options = Options . NE.fromList
   <*> optional (option str $ long "coverage-dir"
     <> metavar "PATH"
     <> help "Directory to save coverage reports. Defaults to corpus-dir if not specified.")
+  <*> optional (option bool $ long "coverage-line-hits"
+    <> metavar "BOOL"
+    <> help "Write coverage_hits.json and expose line hits over MCP.")
+  <*> optional (option bool $ long "mcp"
+    <> metavar "BOOL"
+    <> help "Enable MCP server.")
+  <*> optional (option mcpTransport $ long "mcp-transport"
+    <> metavar "TRANSPORT"
+    <> help "MCP transport: http|unix|stdio.")
+  <*> optional (option (T.pack <$> str) $ long "mcp-host"
+    <> metavar "HOST"
+    <> help "MCP host for HTTP transport.")
+  <*> optional (option auto $ long "mcp-port"
+    <> metavar "PORT"
+    <> help "MCP port for HTTP transport.")
+  <*> optional (option str $ long "mcp-socket"
+    <> metavar "PATH"
+    <> help "MCP unix socket path.")
+  <*> optional (option auto $ long "mcp-max-events"
+    <> metavar "N"
+    <> help "MCP ring buffer size for events.")
+  <*> optional (option auto $ long "mcp-max-reproducer-artifacts"
+    <> metavar "N"
+    <> help "MCP maximum reproducer artifacts to retain.")
+  <*> optional (option auto $ long "mcp-reproducer-artifacts-limit"
+    <> metavar "N"
+    <> help "Alias for mcp-max-reproducer-artifacts.")
+  <*> optional (option auto $ long "mcp-max-reproducer-txs"
+    <> metavar "N"
+    <> help "Maximum transactions returned per reproducer.")
+  <*> optional (option auto $ long "mcp-reproducer-result-ttl-minutes"
+    <> metavar "N"
+    <> help "TTL minutes for MCP reproducer artifacts.")
+  <*> optional (option bool $ long "mcp-include-call-data"
+    <> metavar "BOOL"
+    <> help "Include raw call data in MCP reproducer payloads.")
+  <*> optional (option auto $ long "mcp-max-reproducer-json-bytes"
+    <> metavar "N"
+    <> help "Max JSON bytes for MCP reproducer responses.")
   <*> optional (option str $ long "test-mode"
     <> help "Test mode to use. Either 'property', 'assertion', 'foundry', 'optimization', 'overflow' or 'exploration'" )
   <*> switch (long "all-contracts"
@@ -267,6 +330,7 @@ overrideConfig config Options{..} = do
     config { solConf = overrideSolConf config.solConf
            , campaignConf = overrideCampaignConf config.campaignConf
            , uiConf = overrideUiConf config.uiConf
+           , mcpConf = overrideMcpConf config.mcpConf
            , rpcUrl = cliRpcUrl <|> envRpcUrl <|> config.rpcUrl
            , rpcBlock = cliRpcBlock <|> envRpcBlock <|> config.rpcBlock
            , etherscanApiKey = envEtherscanApiKey <|> config.etherscanApiKey
@@ -289,16 +353,32 @@ overrideConfig config Options{..} = do
     overrideCampaignConf campaignConf = campaignConf
       { corpusDir = cliCorpusDir <|> campaignConf.corpusDir
       , coverageDir = cliCoverageDir <|> campaignConf.coverageDir
+      , coverageLineHits = fromMaybe campaignConf.coverageLineHits cliCoverageLineHits
       , testLimit = fromMaybe campaignConf.testLimit cliTestLimit
       , shrinkLimit = fromMaybe campaignConf.shrinkLimit cliShrinkLimit
       , seqLen = fromMaybe campaignConf.seqLen cliSeqLen
       , seed = cliSeed <|> campaignConf.seed
       , workers = cliWorkers <|> campaignConf.workers
-      , serverPort = cliServerPort <|> campaignConf.serverPort
       , symExec = fromMaybe campaignConf.symExec cliSymExec
       , symExecTargets = if null cliSymExecTargets then campaignConf.symExecTargets else cliSymExecTargets
       , symExecTimeout = fromMaybe campaignConf.symExecTimeout cliSymExecTimeout
       , symExecNSolvers = fromMaybe campaignConf.symExecNSolvers cliSymExecNSolvers
+      }
+
+    overrideMcpConf mcpConf = mcpConf
+      { enabled = fromMaybe mcpConf.enabled cliMcpEnabled
+      , transport = fromMaybe mcpConf.transport cliMcpTransport
+      , host = fromMaybe mcpConf.host cliMcpHost
+      , port = fromMaybe mcpConf.port cliMcpPort
+      , socketPath = fromMaybe mcpConf.socketPath cliMcpSocket
+      , maxEvents = fromMaybe mcpConf.maxEvents cliMcpMaxEvents
+      , maxReproducerArtifacts = fromMaybe
+          (fromMaybe mcpConf.maxReproducerArtifacts cliMcpMaxReproducerArtifacts)
+          (cliMcpReproducerArtifactsLimit <|> cliMcpMaxReproducerArtifacts)
+      , maxReproducerTxs = fromMaybe mcpConf.maxReproducerTxs cliMcpMaxReproducerTxs
+      , reproducerResultTTLMinutes = fromMaybe mcpConf.reproducerResultTTLMinutes cliMcpReproducerResultTTLMinutes
+      , includeCallData = fromMaybe mcpConf.includeCallData cliMcpIncludeCallData
+      , maxReproducerJsonBytes = fromMaybe mcpConf.maxReproducerJsonBytes cliMcpMaxReproducerJsonBytes
       }
 
     overrideSolConf solConf = solConf

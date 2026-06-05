@@ -20,6 +20,7 @@ import Data.Text.IO (writeFile)
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
 import Data.Vector qualified as V
 import Data.Vector.Unboxed qualified as VU
+import Data.Word (Word64)
 import HTMLEntities.Text qualified as HTML
 import Prelude hiding (writeFile)
 import System.Directory (createDirectoryIfMissing)
@@ -214,6 +215,30 @@ srcMapCov sc covMap contracts =
             Nothing -> acc
         ) mempty vec
       Nothing -> mempty
+
+-- | Build per-line hit counts for MCP coverage polling.
+coverageLineHits
+  :: SourceCache
+  -> FrozenCoverageMap
+  -> [SolcContract]
+  -> [Text]
+  -> Map FilePath (Map Int Word64)
+coverageLineHits sc covMap contracts excludePatterns =
+  let
+    covLines = srcMapCov sc covMap contracts
+    allFiles = (\(path, src) -> (path, V.fromList (decodeUtf8 <$> BS.split 0xa src))) <$> Map.elems sc.files
+    commonPrefix = findCommonPathPrefix (map fst allFiles)
+    filteredFiles = filterExcludedFiles excludePatterns commonPrefix allFiles
+    runtimeLinesMap = buildRuntimeLinesMap sc contracts
+    fileLineHits srcPath =
+      let runtimeLines = fromMaybe mempty $ Map.lookup srcPath runtimeLinesMap
+          covered = fromMaybe Map.empty (Map.lookup srcPath covLines)
+          lineHits = Map.fromList
+            [ (line, fromIntegral . length $ fromMaybe [] (Map.lookup line covered))
+            | line <- S.toList runtimeLines
+            ]
+      in (makeRelativePath commonPrefix srcPath, lineHits)
+  in Map.fromList (map (fileLineHits . fst) filteredFiles)
 
 -- | Given a contract, and tuple as coverage, return the corresponding mapped line (if any)
 srcMapForOpLocation :: SolcContract -> OpIx -> Maybe SrcMap

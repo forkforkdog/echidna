@@ -1,0 +1,371 @@
+diff --git a/src/EVM.hs b/src/EVM.hs
+index e045196d..1db06791 100644
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -29,7 +29,7 @@ import EVM.Effects (Config (..))
+ 
+ import Control.Monad (unless, when)
+ import Control.Monad.ST (ST, RealWorld)
+-import Control.Monad.State.Strict (MonadState, State, get, gets, lift, modify', put)
++import Control.Monad.State.Strict (MonadState, State, get, gets, lift, modify', put, execStateT)
+ import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize)
+ import Data.ByteArray qualified as BA
+ import Data.ByteString (ByteString)
+@@ -160,7 +160,7 @@ makeVm o = do
+       , origin = txorigin
+       , toAddr = txtoAddr
+       , value = o.value
+-      , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty
++      , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty False mempty mempty
+       , isCreate = o.create
+       , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
+       , txdataFloorGas = o.txdataFloorGas
+@@ -792,16 +792,22 @@ exec1 conf = do
+               let
+                 finalizeLoad readValue = do next; assign' (#state % #stack) (readValue:xs)
+ 
+-                symbolicRead :: EVM t () = if this.external
+-                  then accessStorage self x finalizeLoad
+-                  else finalizeLoad $ Expr.readStorage' (Expr.concKeccakOnePass x) this.storage
++                symbolicRead :: EVM t () = do
++                  case maybeLitWordSimp x of
++                    Nothing -> pure ()
++                    Just slot -> recordStorageRead self slot
++                  if this.external
++                    then accessStorage self x finalizeLoad
++                    else finalizeLoad $ Expr.readStorage' (Expr.concKeccakOnePass x) this.storage
+ 
+                 concreteRead :: EVM t () = do
+-                  acc <- accessStorageForGas self (forceLit x)
++                  let slot = forceLit x
++                  acc <- accessStorageForGas self slot
++                  recordStorageRead self slot
+                   let cost = if acc then g_warm_storage_read else g_cold_sload
+                   burn cost $ if this.external
+                     then accessStorage self x finalizeLoad
+-                    else finalizeLoad $ Lit $ accessConcreteStorage this.storage (forceLit x)
++                    else finalizeLoad $ Lit $ accessConcreteStorage this.storage slot
+               in whenSymbolicElse symbolicRead concreteRead
+             _ -> underrun
+ 
+@@ -811,6 +817,9 @@ exec1 conf = do
+             x:new:xs ->
+               let
+                 updateVMState :: EVM t () = do
++                  case maybeLitWordSimp x of
++                    Nothing -> pure ()
++                    Just slot -> recordStorageWrite self slot
+                   next
+                   assign' (#state % #stack) xs
+                   modifying (#env % #contracts % ix self % #storage) (writeStorage x new)
+@@ -821,6 +830,7 @@ exec1 conf = do
+                     currentVal = accessConcreteStorage this.storage slot
+                     newVal = forceLit new
+                     originalVal = accessConcreteStorage this.origStorage slot
++                  recordStorageWrite self slot
+                   ensureGas g_callstipend $ do
+                     let storage_cost
+                           | (currentVal == newVal) = g_sload
+@@ -1601,7 +1611,7 @@ finalize :: VMOps t => EVM t ()
+ finalize = do
+   let
+     revertContracts  = use (#tx % #txReversion) >>= assign (#env % #contracts)
+-    revertSubstate   = assign (#tx % #subState) (SubState mempty mempty mempty mempty mempty mempty)
++    revertSubstate   = assign (#tx % #subState) (SubState mempty mempty mempty mempty mempty mempty False mempty mempty)
+ 
+   addAliasConstraints
+   use #result >>= \case
+@@ -1854,6 +1864,19 @@ accessStorageForGas addr key = do
+   unless accessed $ assign (#tx % #subState % #accessedStorageKeys) (insert (addr, key) accessedStrkeys)
+   pure accessed
+ 
++recordStorageRead :: Expr EAddr -> W256 -> EVM t ()
++recordStorageRead addr key = do
++  rec <- use (#tx % #subState % #recordingStorageAccesses)
++  when rec $
++    modifying (#tx % #subState % #recordedStorageReads) ((addr, key) :)
++
++recordStorageWrite :: Expr EAddr -> W256 -> EVM t ()
++recordStorageWrite addr key = do
++  rec <- use (#tx % #subState % #recordingStorageAccesses)
++  when rec $ do
++    modifying (#tx % #subState % #recordedStorageWrites) ((addr, key) :)
++    modifying (#tx % #subState % #recordedStorageReads) ((addr, key) :)
++
+ -- * Cheat codes
+ 
+ -- The cheat code is 7109709ecfa91a80626ff3989d68f67f5b1dd12d.
+@@ -1942,6 +1965,18 @@ cheatActions = Map.fromList
+               doStop
+         _ -> vmError (BadCheatCode "deal(address,uint256) parameter decoding failed" sig)
+ 
++  , action "deal(address,address,uint256)" $
++      \sig input -> case decodeStaticArgs 0 3 input of
++        [token, to_, give] ->
++          dealErc20 sig token to_ give (Lit 0)
++        _ -> vmError (BadCheatCode "deal(address,address,uint256) parameter decoding failed" sig)
++
++  , action "deal(address,address,uint256,bool)" $
++      \sig input -> case decodeStaticArgs 0 4 input of
++        [token, to_, give, adjust] ->
++          dealErc20 sig token to_ give adjust
++        _ -> vmError (BadCheatCode "deal(address,address,uint256,bool) parameter decoding failed" sig)
++
+   , action "assume(bool)" $
+       \sig input -> case decodeStaticArgs 0 1 input of
+         [c] -> do
+@@ -1958,6 +1993,46 @@ cheatActions = Map.fromList
+           doStop
+         _ -> vmError (BadCheatCode "roll(uint256) parameter decoding failed" sig)
+ 
++  , action "record()" $
++      \_ _ -> do
++        assign (#tx % #subState % #recordingStorageAccesses) True
++        assign (#tx % #subState % #recordedStorageReads) []
++        assign (#tx % #subState % #recordedStorageWrites) []
++        doStop
++
++  , action "accesses(address)" $
++      \sig input -> case decodeStaticArgs 0 1 input of
++        [a] -> case wordToAddr a of
++          Just a'@(LitAddr _) -> do
++            ss <- use (#tx % #subState)
++            if not ss.recordingStorageAccesses
++              then frameReturn $ AbiTuple $ V.fromList
++                [ AbiArrayDynamic (AbiBytesType 32) V.empty
++                , AbiArrayDynamic (AbiBytesType 32) V.empty
++                ]
++              else do
++                let readsSlots =
++                      uniqPreserveOrder
++                        [ slot
++                        | (addrExpr, slot) <- reverse ss.recordedStorageReads
++                        , addrExpr == a'
++                        ]
++                    writeSlots =
++                      uniqPreserveOrder
++                        [ slot
++                        | (addrExpr, slot) <- reverse ss.recordedStorageWrites
++                        , addrExpr == a'
++                        ]
++                    toBytes32 w = AbiBytes 32 (word256Bytes w)
++                    readsV = V.fromList (fmap toBytes32 readsSlots)
++                    writesV = V.fromList (fmap toBytes32 writeSlots)
++                frameReturn $ AbiTuple $ V.fromList
++                  [ AbiArrayDynamic (AbiBytesType 32) readsV
++                  , AbiArrayDynamic (AbiBytesType 32) writesV
++                  ]
++          _ -> vmError (BadCheatCode "accesses(address): could not decode address" sig)
++        _ -> vmError (BadCheatCode "accesses(address) parameter decoding failed" sig)
++
+   , action "store(address,bytes32,bytes32)" $
+       \sig input -> case decodeStaticArgs 0 3 input of
+         [a, slot, new] -> case wordToAddr a of
+@@ -2217,6 +2292,193 @@ cheatActions = Map.fromList
+   ]
+   where
+     action s f = (abiKeccak s, f (abiKeccak s))
++
++    uniqPreserveOrder :: Ord a => [a] -> [a]
++    uniqPreserveOrder = go mempty
++      where
++        go _ [] = []
++        go seen (x:xs)
++          | member x seen = go seen xs
++          | otherwise = x : go (insert x seen) xs
++
++    dealErc20 sig tokenW toW giveW adjustW =
++      whenSymbolicElse
++        (vmError (BadCheatCode "deal(address,address,uint256[,bool]) not supported in symbolic mode" sig))
++        (forceAddr tokenW (unexpectedSymArgW "deal(erc20): cannot decode token into an address") $ \tokenE ->
++            forceAddr toW (unexpectedSymArgW "deal(erc20): cannot decode recipient into an address") $ \toE ->
++              forceConcreteAddr tokenE "deal(erc20): token must be concrete" $ \token ->
++              forceConcreteAddr toE "deal(erc20): recipient must be concrete" $ \toAddr ->
++                forceConcrete giveW "deal(erc20): give must be concrete" $ \give ->
++                  forceConcrete adjustW "deal(erc20): adjustTotalSupply must be concrete" $ \adjWord -> do
++                    let adjustTotalSupply = adjWord /= 0
++                    let cdBal = erc20BalanceOfSel <> word256Bytes (fromIntegral toAddr :: W256)
++                    callTarget token cdBal $ \(succPrev, _retPrev, retWordPrev, _readsPrev) ->
++                      if not succPrev then frameRevert "deal: balanceOf call failed"
++                      else do
++                        let prevBal = retWordPrev
++                        checkedWrite token cdBal give $ do
++                          if not adjustTotalSupply then doStop
++                          else do
++                            let cdTot = erc20TotalSupplySel
++                            callTarget token cdTot $ \(succSup, _retSup, retWordSup, _readsSup) ->
++                              if not succSup then frameRevert "deal: totalSupply call failed"
++                              else case adjustSupplyChecked retWordSup prevBal give of
++                                Left () -> finishFrame (FrameReverted (ConcreteBuf panicArithmetic))
++                                Right totalSupply' -> checkedWrite token cdTot totalSupply' doStop
++        )
++
++    erc20BalanceOfSel :: ByteString
++    erc20BalanceOfSel = BS.pack [0x70, 0xa0, 0x82, 0x31]
++
++    erc20TotalSupplySel :: ByteString
++    erc20TotalSupplySel = BS.pack [0x18, 0x16, 0x0d, 0xdd]
++
++    panicArithmetic :: ByteString
++    panicArithmetic = selector "Panic(uint256)" <> word256Bytes (0x11 :: W256)
++
++    adjustSupplyChecked :: W256 -> W256 -> W256 -> Either () W256
++    adjustSupplyChecked totalSupply prevBal give
++      | give < prevBal =
++          let delta = prevBal - give
++          in if totalSupply < delta then Left () else Right (totalSupply - delta)
++      | otherwise =
++          let delta = give - prevBal
++          in if totalSupply > (maxBound - delta) then Left () else Right (totalSupply + delta)
++
++    checkedWrite token cd setVal cont =
++      callTarget token cd $ \(succ0, _ret, callResult, readSlots0) -> do
++        unless succ0 $ frameRevert "checked_write: initial call failed"
++        if null readSlots0 then frameRevert "checked_write: no storage use detected"
++        else
++          findSlot token cd callResult (reverse readSlots0) $ \slot -> do
++            loadSlot token slot $ \curVal -> do
++              storeSlot token slot setVal
++              callTarget token cd $ \(succ1, _ret1, callResult1, _reads1) ->
++                if succ1 && callResult1 == setVal then cont
++                else do
++                  storeSlot token slot curVal
++                  frameRevert "checked_write: failed to write value"
++
++    findSlot _ _ _ [] _ = frameRevert "checked_write: slot not found"
++    findSlot token cd callResult (slot:rest) cont = do
++      loadSlot token slot $ \prev -> do
++        if prev /= callResult
++          then findSlot token cd callResult rest cont
++          else checkSlotMutatesCall token cd slot $ \ok ->
++            if ok then cont slot else findSlot token cd callResult rest cont
++
++    checkSlotMutatesCall token cd slot cont = do
++      loadSlot token slot $ \prevSlotValue -> do
++        callTarget token cd $ \(success0, _ret0, prevReturnValue, _reads0) -> do
++          let testVal = if prevReturnValue == 0 then maxBound else 0
++          storeSlot token slot testVal
++          callTarget token cd $ \(_success1, _ret1, newReturnValue, _reads1) -> do
++            storeSlot token slot prevSlotValue
++            cont (success0 && prevReturnValue /= newReturnValue)
++
++    loadSlot token slot cont =
++      accessStorage (LitAddr token) (Lit slot) $ \res ->
++        forceConcrete res "deal(erc20): storage read must be concrete" cont
++
++    storeSlot token slot val =
++      fetchAccount (LitAddr token) $ \_ -> do
++        modifying (#env % #contracts % ix (LitAddr token) % #storage) (writeStorage (Lit slot) (Lit val))
++
++    callTarget token cd cont =
++      fetchAccount (LitAddr token) $ \targetContr -> do
++        vm <- get
++        let nestedGas = case vm.frames of
++              Frame { state = st } : _ -> st.gas
++              _ -> vm.state.gas
++            allContracts = vm.env.contracts
++            others = Map.toList $ Map.delete (LitAddr token) allContracts
++            opts = VMOpts
++              { contract = targetContr
++              , otherContracts = others
++              , calldata = (ConcreteBuf cd, [])
++              , baseState = vm.config.baseState
++              , value = Lit 0
++              , priorityFee = vm.tx.priorityFee
++              , address = LitAddr token
++              , caller = vm.state.contract
++              , origin = vm.tx.origin
++              , gas = nestedGas
++              , gaslimit = vm.tx.gaslimit
++              , number = vm.block.number
++              , timestamp = vm.block.timestamp
++              , coinbase = vm.block.coinbase
++              , prevRandao = vm.block.prevRandao
++              , maxCodeSize = vm.block.maxCodeSize
++              , blockGaslimit = vm.block.gaslimit
++              , gasprice = vm.tx.gasprice
++              , baseFee = vm.block.baseFee
++              , schedule = vm.block.schedule
++              , chainId = vm.env.chainId
++              , create = False
++              , txAccessList = mempty
++              , allowFFI = False
++              , freshAddresses = vm.env.freshAddresses
++              , beaconRoot = 0
++              , parentHash = 0
++              , txdataFloorGas = vm.tx.txdataFloorGas
++              }
++        nested0 <- lift $ makeVm opts
++        nested1 <- lift $ execStateT (assign (#state % #static) True) nested0
++        runNestedVM nested1 $ \nestedF -> do
++          let
++            (success, outExpr) = case nestedF.result of
++              Just (VMSuccess out) -> (True, out)
++              Just (VMFailure (Revert out)) -> (False, out)
++              Just (VMFailure _) -> (False, ConcreteBuf "")
++              _ -> (False, ConcreteBuf "")
++            outBytes = case outExpr of
++              ConcreteBuf bs -> bs
++              _ -> mempty
++            outWord = fromMaybe 0 (maybeLitWordSimp (readWord (Lit 0) outExpr))
++            readSlots =
++              [ s
++              | (addrExpr, s) <- toList nestedF.tx.subState.accessedStorageKeys
++              , addrExpr == LitAddr token
++              ]
++          cont (success, outBytes, outWord, readSlots)
++
++    runNestedVM :: (?conf :: Config, VMOps t, Typeable t) => VM t -> (VM t -> EVM t ()) -> EVM t ()
++    runNestedVM vm0 cont = do
++      vm1 <- lift $ execStateT (exec1 ?conf) vm0
++      case vm1.result of
++        Nothing -> runNestedVM vm1 cont
++        Just (HandleEffect (Query q)) -> runNestedQuery vm1 q cont
++        Just _ -> cont vm1
++
++    runNestedQuery :: (?conf :: Config, VMOps t, Typeable t) => VM t -> Query t -> (VM t -> EVM t ()) -> EVM t ()
++    runNestedQuery nested q cont = case q of
++      PleaseFetchContract addr base k ->
++        query $ PleaseFetchContract addr base $ \c -> do
++          assign #result Nothing
++          assign (#env % #contracts % at (LitAddr addr)) (Just c)
++          nested' <- lift $ execStateT (k c) nested
++          runNestedVM nested' cont
++      PleaseFetchSlot addr slot k ->
++        query $ PleaseFetchSlot addr slot $ \x -> do
++          assign #result Nothing
++          modifying (#env % #contracts % ix (LitAddr addr) % #storage) (writeStorage (Lit slot) (Lit x))
++          nested' <- lift $ execStateT (k x) nested
++          runNestedVM nested' cont
++      PleaseAskSMT condition constraints k ->
++        query $ PleaseAskSMT condition constraints $ \bc -> do
++          assign #result Nothing
++          nested' <- lift $ execStateT (k bc) nested
++          runNestedVM nested' cont
++      PleaseGetSols expr numBytes constraints k ->
++        query $ PleaseGetSols expr numBytes constraints $ \sols -> do
++          assign #result Nothing
++          nested' <- lift $ execStateT (k sols) nested
++          runNestedVM nested' cont
++      PleaseDoFFI cmd env k ->
++        query $ PleaseDoFFI cmd env $ \bs -> do
++          assign #result Nothing
++          nested' <- lift $ execStateT (k bs) nested
++          runNestedVM nested' cont
+     either' v l r = either l r v
+     frameReturn :: VMOps t => AbiValue -> EVM t ()
+     frameReturn v = frameReturnBuf $ encodeAbiValue v
+diff --git a/src/EVM/Types.hs b/src/EVM/Types.hs
+index c17d6192..04a7d7f2 100644
+--- a/src/EVM/Types.hs
++++ b/src/EVM/Types.hs
+@@ -812,6 +812,9 @@ data SubState = SubState
+   , accessedStorageKeys :: Set (Expr EAddr, W256)
+   , refunds             :: [(Expr EAddr, Word64)]
+   , createdContracts    :: Set (Expr EAddr)
++  , recordingStorageAccesses :: Bool
++  , recordedStorageReads     :: [(Expr EAddr, W256)]
++  , recordedStorageWrites    :: [(Expr EAddr, W256)]
+   -- in principle we should include logs here, but do not for now
+   }
+   deriving (Eq, Ord, Show)

@@ -135,6 +135,8 @@ data CampaignConf = CampaignConf
     -- ^ List of file formats to save coverage reports
   , coverageExcludes   :: [Text]
     -- ^ List of glob patterns for files/directories to exclude from coverage reports
+  , coverageLineHits :: Bool
+    -- ^ Whether to include per-line hit counts in coverage outputs.
   , workers            :: Maybe Word8
     -- ^ Number of fuzzing workers
   , serverPort         :: Maybe Word16

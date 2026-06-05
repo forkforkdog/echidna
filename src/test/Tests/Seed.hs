@@ -33,6 +33,7 @@ seedTests =
         , corpusDir = Nothing
         , mutConsts = defaultMutationConsts
         , coverageFormats = [Txt,Html,Lcov]
+        , coverageLineHits = True
         , workers = Nothing
         , serverPort = Nothing
         }

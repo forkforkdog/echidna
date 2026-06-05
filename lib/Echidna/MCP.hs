@@ -6,16 +6,22 @@ module Echidna.MCP where
 import Control.Concurrent (forkIO)
 import Control.Monad (forever, unless)
 import Control.Concurrent.STM
-import Data.Aeson (Value(Null), encode, object, toJSON, (.=))
+import Control.Concurrent.Chan (dupChan, readChan)
+import Data.Aeson (FromJSON(..), Result(..), ToJSON(..), Value(..), encode, fromJSON, object, toJSON, withObject, (.:), (.:?), (.=))
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as K
+import Data.Aeson.KeyMap qualified as KM
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import Data.IORef (readIORef, modifyIORef', newIORef, IORef, atomicModifyIORef')
 import Data.List (find, isPrefixOf, isSuffixOf, sort)
+import Data.Scientific (floatingOrInteger)
 import qualified Data.Maybe
 import qualified Data.Set as Set
 import qualified Data.Vector as Vector
 import Data.Text (Text, pack, unpack)
 import qualified Data.Text as T
-import Data.Time (UTCTime, getCurrentTime, diffUTCTime)
+import Data.Text.Encoding (decodeUtf8)
+import Data.Time (LocalTime, UTCTime, defaultTimeLocale, diffUTCTime, formatTime, getCurrentTime)
 import Text.Printf (printf)
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -23,26 +29,31 @@ import Text.Read (readMaybe)
 import System.Directory (getCurrentDirectory)
 import System.Timeout (timeout)
 import Data.Char (isSpace, toLower)
+import Data.String (fromString)
 
 import MCP.Server
 import EVM.Dapp (DappInfo(..))
 import EVM.Solidity (SolcContract(..), Method(..))
 import EVM.Types (Addr, W256)
 import EVM.ABI (AbiValue(..), AbiType(..), abiValueType)
-import Echidna.Types.Test (EchidnaTest(..), didFail, isOptimizationTest)
+import Echidna.Types.Test (EchidnaTest(..), TestState(..), TestType(..), didFail, isOptimizationTest)
 import Echidna.Types.Solidity (SolConf(..))
 import Echidna.Types.Tx (Tx(..), TxCall(..), maxGasPerBlock)
 import Echidna.Types.Coverage (CoverageFileType(..), mergeCoverageMaps, coverageStats)
-import Echidna.Output.Source (ppCoveredCode, saveLcovHook)
+import Echidna.Output.Source (coverageLineHits, ppCoveredCode, saveLcovHook)
 import Echidna.Output.Corpus (loadTxs)
 
-import Echidna.Types.Config (Env(..), EConfig(..))
+import Echidna.Types.Config (Env(..), EConfig(..), MCPConf(..))
 import Echidna.Types.World (World(..))
 import Echidna.Types.Campaign
   ( getNFuzzWorkers, CampaignConf(..), WorkerState(..)
   , SampleStats(..), mergeSampleStats
   )
 import Echidna.Types.InterWorker (Bus, Message(..), WrappedMessage(..), AgentId(..), FuzzerCmd(..), BroadcastMsg(..))
+import Echidna.Types.Worker qualified as Worker
+import Network.HTTP.Types (ResponseHeaders, Status, hContentType, methodGet, methodPost, status200, status202, status404, status405)
+import Network.Wai (Application, Response, pathInfo, requestMethod, responseBuilder, responseLBS, strictRequestBody)
+import Network.Wai.Handler.Warp (runSettings, setHost, setPort, defaultSettings)
 
 -- | Status state to track coverage info
 data StatusState = StatusState
@@ -602,3 +613,491 @@ runMCPServer env workerRefs port = do
             }
 
     runMcpServerHttpWithConfig httpConfig serverInfo handlers
+
+data StreamableEventBuffer = StreamableEventBuffer
+  { streamableNextEventId :: !Int
+  , streamableEventItems  :: ![(Int, StreamableMCPEvent)]
+  }
+
+data StreamableMCPState = StreamableMCPState
+  { streamableEventsRef :: IORef StreamableEventBuffer
+  , streamableStartedAt :: UTCTime
+  , streamableMaxEvents :: Int
+  }
+
+data StreamableMCPEvent = StreamableMCPEvent
+  { streamableEventId :: Int
+  , streamableTimestamp :: Text
+  , streamableWorkerId :: Maybe Int
+  , streamableWorkerType :: Maybe Text
+  , streamableEventType :: Text
+  , streamablePayload :: Value
+  }
+
+instance ToJSON StreamableMCPEvent where
+  toJSON ev = object
+    [ "id" .= ev.streamableEventId
+    , "ts" .= ev.streamableTimestamp
+    , "workerId" .= ev.streamableWorkerId
+    , "workerType" .= ev.streamableWorkerType
+    , "type" .= ev.streamableEventType
+    , "payload" .= ev.streamablePayload
+    ]
+
+data StreamableRpcRequest = StreamableRpcRequest
+  { streamableRpcId :: Maybe Value
+  , streamableRpcMethod :: Text
+  , streamableRpcParams :: Maybe Value
+  }
+
+instance FromJSON StreamableRpcRequest where
+  parseJSON = withObject "StreamableRpcRequest" $ \o ->
+    StreamableRpcRequest <$> o .:? "id" <*> o .: "method" <*> o .:? "params"
+
+runStreamableMCPServer :: Env -> [IORef WorkerState] -> IO ()
+runStreamableMCPServer env workerRefs = do
+  started <- getCurrentTime
+  eventsRef <- newIORef (StreamableEventBuffer 0 [])
+  let st = StreamableMCPState eventsRef started (max 1 env.cfg.mcpConf.maxEvents)
+  ch <- dupChan env.eventQueue
+  _ <- forkIO $ forever $ do
+    (ts, ev) <- readChan ch
+    recordStreamableEvent st ts ev
+  let conf = env.cfg.mcpConf
+      settings = setPort conf.port . setHost (fromString $ T.unpack conf.host) $ defaultSettings
+  runSettings settings (streamableMCPApp env workerRefs st)
+
+streamableMCPApp :: Env -> [IORef WorkerState] -> StreamableMCPState -> Application
+streamableMCPApp env workerRefs st req respond =
+  case (requestMethod req, pathInfo req) of
+    (m, ["health"]) | m == methodGet ->
+      respond $ responseLBS status200 jsonHeaders "{\"ok\":true}"
+    (m, ["mcp"]) | m == methodPost -> do
+      body <- strictRequestBody req
+      case eitherDecodeValue body of
+        Left err ->
+          respond $ streamableJson status200 $ streamableMcpError Null (-32700) (T.pack err)
+        Right val ->
+          case fromJSON val of
+            Error err ->
+              respond $ streamableJson status200 $ streamableMcpError Null (-32600) (T.pack err)
+            Success rpc -> do
+              result <- handleStreamableRpc env workerRefs st rpc
+              case result of
+                Nothing -> respond $ responseBuilder status202 jsonHeaders mempty
+                Just val' -> respond $ streamableJson status200 val'
+    (_, ["mcp"]) ->
+      respond $ responseLBS status405 jsonHeaders "{\"error\":\"method not allowed\"}"
+    _ ->
+      respond $ responseLBS status404 jsonHeaders "{\"error\":\"not found\"}"
+  where
+    eitherDecodeValue = Aeson.eitherDecode
+
+streamableJson :: Status -> Value -> Response
+streamableJson status val = responseLBS status jsonHeaders (encode val)
+
+jsonHeaders :: ResponseHeaders
+jsonHeaders =
+  [ (hContentType, "application/json")
+  , ("Mcp-Session-Id", "echidna")
+  ]
+
+handleStreamableRpc :: Env -> [IORef WorkerState] -> StreamableMCPState -> StreamableRpcRequest -> IO (Maybe Value)
+handleStreamableRpc env workerRefs st req =
+  case req.streamableRpcMethod of
+    "initialize" ->
+      pure . Just $ streamableMcpResult (fromMaybeNull req.streamableRpcId) streamableInitializeResult
+    "notifications/initialized" ->
+      pure Nothing
+    "ping" ->
+      pure . Just $ streamableMcpResult (fromMaybeNull req.streamableRpcId) (object [])
+    "tools/list" ->
+      pure . Just $ streamableMcpResult (fromMaybeNull req.streamableRpcId) streamableToolsList
+    "resources/list" ->
+      pure . Just $ streamableMcpResult (fromMaybeNull req.streamableRpcId) streamableResourcesList
+    "tools/call" -> do
+      res <- streamableToolsCall env workerRefs st req.streamableRpcParams
+      pure . Just $ either id (streamableMcpResult (fromMaybeNull req.streamableRpcId)) res
+    "resources/read" -> do
+      res <- streamableResourcesRead env workerRefs st req.streamableRpcParams
+      pure . Just $ either id (streamableMcpResult (fromMaybeNull req.streamableRpcId)) res
+    _ ->
+      pure . Just $ streamableMcpError (fromMaybeNull req.streamableRpcId) (-32601) "Method not found"
+
+streamableInitializeResult :: Value
+streamableInitializeResult = object
+  [ "protocolVersion" .= ("2024-11-05" :: Text)
+  , "capabilities" .= object
+      [ "resources" .= object []
+      , "tools" .= object []
+      ]
+  , "serverInfo" .= object
+      [ "name" .= ("echidna" :: Text)
+      , "title" .= ("Echidna" :: Text)
+      , "version" .= ("1.0.0" :: Text)
+      ]
+  ]
+
+streamableToolsList :: Value
+streamableToolsList = object
+  [ "tools" .=
+      [ streamableTool "get_status" "Get run status"
+      , streamableTool "get_events" "Get recent campaign events"
+      , streamableTool "get_reproducers" "List reproducer snapshots"
+      , streamableTool "get_reproducer" "Get a reproducer snapshot"
+      , streamableTool "get_coverage_hits" "Get coverage line hits"
+      ]
+  ]
+  where
+    streamableTool name desc = object
+      [ "name" .= (name :: Text)
+      , "description" .= (desc :: Text)
+      , "inputSchema" .= object []
+      ]
+
+streamableResourcesList :: Value
+streamableResourcesList = object
+  [ "resources" .=
+      [ streamableResource "echidna://run/status" "Run status"
+      , streamableResource "echidna://run/events" "Events"
+      , streamableResource "echidna://run/reproducers" "Reproducer snapshots"
+      , streamableResource "echidna://coverage/lines" "Coverage line hits"
+      ]
+  ]
+  where
+    streamableResource uri name = object
+      [ "uri" .= (uri :: Text)
+      , "name" .= (name :: Text)
+      , "mimeType" .= ("application/json" :: Text)
+      ]
+
+streamableToolsCall :: Env -> [IORef WorkerState] -> StreamableMCPState -> Maybe Value -> IO (Either Value Value)
+streamableToolsCall env workerRefs st params =
+  case params of
+    Just (Object o) ->
+      case KM.lookup (K.fromText "name") o of
+        Just (String name) -> do
+          let args = KM.lookup (K.fromText "arguments") o
+          value <- runStreamableTool env workerRefs st name args
+          pure . Right . object $
+            [ "content" .=
+                [ object
+                    [ "type" .= ("text" :: Text)
+                    , "text" .= decodeUtf8 (BL8.toStrict $ encode value)
+                    ]
+                ]
+            ]
+        _ -> pure . Left $ streamableMcpError Null (-32602) "Missing tool name"
+    _ -> pure . Left $ streamableMcpError Null (-32602) "Missing params"
+
+streamableResourcesRead :: Env -> [IORef WorkerState] -> StreamableMCPState -> Maybe Value -> IO (Either Value Value)
+streamableResourcesRead env workerRefs st params =
+  case params of
+    Just (Object o) ->
+      case KM.lookup (K.fromText "uri") o of
+        Just (String uri) -> do
+          value <- readStreamableResource env workerRefs st uri
+          let content = object
+                [ "uri" .= uri
+                , "mimeType" .= ("application/json" :: Text)
+                , "text" .= decodeUtf8 (BL8.toStrict $ encode value)
+                ]
+          pure . Right $ object ["contents" .= [content]]
+        _ -> pure . Left $ streamableMcpError Null (-32602) "Missing uri"
+    _ -> pure . Left $ streamableMcpError Null (-32602) "Missing params"
+
+runStreamableTool :: Env -> [IORef WorkerState] -> StreamableMCPState -> Text -> Maybe Value -> IO Value
+runStreamableTool env workerRefs st name args =
+  case name of
+    "get_status" -> streamableStatus env workerRefs st
+    "get_events" -> streamableEvents st (streamableArgsToMap args)
+    "get_reproducers" -> streamableReproducers env (streamableArgsToMap args)
+    "get_reproducer" -> streamableReproducer env (streamableArgsToMap args)
+    "get_coverage_hits" -> streamableCoverageLines env
+    _ -> pure $ object ["error" .= ("unknown tool" :: Text)]
+
+readStreamableResource :: Env -> [IORef WorkerState] -> StreamableMCPState -> Text -> IO Value
+readStreamableResource env workerRefs st uri =
+  case streamableSplitUri uri of
+    ("echidna://run/status", _) -> streamableStatus env workerRefs st
+    ("echidna://run/events", query) -> streamableEvents st query
+    ("echidna://run/reproducers", query) -> streamableReproducers env query
+    ("echidna://coverage/lines", _) -> streamableCoverageLines env
+    (path, _) | "echidna://run/reproducer/" `T.isPrefixOf` path ->
+      streamableReproducer env (Map.singleton "testKey" (T.drop (T.length "echidna://run/reproducer/") path))
+    _ -> pure $ object ["error" .= ("unknown resource" :: Text)]
+
+streamableStatus :: Env -> [IORef WorkerState] -> StreamableMCPState -> IO Value
+streamableStatus env workerRefs st = do
+  workers <- mapM readIORef workerRefs
+  tests <- mapM readIORef env.testRefs
+  corpus <- readIORef env.corpusRef
+  (points, codehashes) <- coverageStats env.coverageRefInit env.coverageRefRuntime
+  now <- getCurrentTime
+  let runs = sum $ map (.ncalls) workers
+      failedTests = length $ filter didFail tests
+      elapsedMs = floor (realToFrac (diffUTCTime now st.streamableStartedAt) * (1000 :: Double))
+  pure $ object
+    [ "phase" .= ("running" :: Text)
+    , "runs" .= runs
+    , "counters" .= object
+        [ "totalCalls" .= runs
+        , "successCalls" .= (runs - failedTests)
+        , "failedCalls" .= failedTests
+        ]
+    , "coveragePoints" .= points
+    , "uniqueCodehashes" .= codehashes
+    , "corpusSize" .= Set.size corpus
+    , "tests" .= object
+        [ "total" .= length tests
+        , "failed" .= failedTests
+        ]
+    , "corpus" .= object ["size" .= Set.size corpus]
+    , "elapsedMs" .= (max 0 elapsedMs :: Int)
+    ]
+
+streamableEvents :: StreamableMCPState -> Map Text Text -> IO Value
+streamableEvents st query = do
+  StreamableEventBuffer _ items <- readIORef st.streamableEventsRef
+  let since = streamableReadQueryInt "since" (-1) query
+      limit = streamableReadQueryInt "limit" 200 query
+      selected = take limit [ev | (i, ev) <- items, i > since]
+  pure $ object ["events" .= selected]
+
+streamableReproducers :: Env -> Map Text Text -> IO Value
+streamableReproducers env query = do
+  tests <- mapM readIORef env.testRefs
+  let offset = streamableReadQueryInt "offset" 0 query
+      limit = streamableReadQueryInt "limit" env.cfg.mcpConf.maxReproducerArtifacts query
+      artifacts = filter streamableArtifactHasReproducer (zipWith (streamableTestArtifact env.cfg.mcpConf) [0..] tests)
+      selected = take limit (drop offset artifacts)
+  pure $ object
+    [ "reproducers" .= selected
+    , "count" .= length artifacts
+    , "nextOffset" .= (offset + length selected)
+    ]
+
+streamableReproducer :: Env -> Map Text Text -> IO Value
+streamableReproducer env query = do
+  tests <- mapM readIORef env.testRefs
+  let artifacts = zipWith (streamableTestArtifact env.cfg.mcpConf) [0..] tests
+      matchKey artifact = Map.lookup "testKey" query == streamableObjectText "testKey" artifact
+  case find matchKey artifacts of
+    Just artifact -> pure $ object ["testKey" .= streamableObjectText "testKey" artifact, "artifact" .= artifact]
+    Nothing -> pure $ object ["error" .= ("reproducer not found" :: Text)]
+
+streamableCoverageLines :: Env -> IO Value
+streamableCoverageLines env = do
+  covMap <- mergeCoverageMaps env.dapp env.coverageRefInit env.coverageRefRuntime
+  let contracts = Map.elems env.dapp.solcByName
+      hits = coverageLineHits env.sourceCache covMap contracts env.cfg.campaignConf.coverageExcludes
+  pure $ toJSON hits
+
+streamableTestArtifact :: MCPConf -> Int -> EchidnaTest -> Value
+streamableTestArtifact conf idx test =
+  let txs = streamableShapeTxs conf test.reproducer
+      key = T.intercalate ":" ["test", T.pack (show idx), streamableRenderTestType test.testType]
+      testId = streamableRenderTestId test
+  in object
+    [ "testKey" .= key
+    , "testId" .= testId
+    , "workerId" .= test.workerId
+    , "testType" .= streamableRenderTestType test.testType
+    , "state" .= streamableRenderTestState test.state
+    , "reproducer" .= object
+        [ "latest" .= txs
+        , "best" .= txs
+        , "candidate" .= txs
+        , "length" .= object
+            [ "latest" .= length txs
+            , "best" .= length txs
+            , "candidate" .= length txs
+            ]
+        ]
+    , "shrink" .= object
+        [ "status" .= streamableShrinkStatus test.state
+        , "fullyShrunk" .= streamableFullyShrunk test.state
+        ]
+    ]
+
+streamableArtifactHasReproducer :: Value -> Bool
+streamableArtifactHasReproducer = \case
+  Object o ->
+    case KM.lookup (K.fromText "reproducer") o of
+      Just (Object r) ->
+        case KM.lookup (K.fromText "best") r of
+          Just (Array xs) -> not (null xs)
+          _ -> False
+      _ -> False
+  _ -> False
+
+streamableShapeTxs :: MCPConf -> [Tx] -> [Tx]
+streamableShapeTxs conf =
+  let trimTxs = if conf.maxReproducerTxs <= 0 then id else take conf.maxReproducerTxs
+      redact tx = if conf.includeCallData then tx else tx { call = NoCall }
+  in map redact . trimTxs
+
+streamableRenderTestId :: EchidnaTest -> Text
+streamableRenderTestId test =
+  case test.testType of
+    PropertyTest name _ -> name
+    OptimizationTest name _ -> name
+    AssertionTest _ (name, _) _ -> name
+    CallTest name _ -> name
+    Exploration -> "exploration"
+
+streamableRenderTestType :: TestType -> Text
+streamableRenderTestType = \case
+  PropertyTest{} -> "property"
+  OptimizationTest{} -> "optimization"
+  AssertionTest{} -> "assertion"
+  CallTest{} -> "call"
+  Exploration -> "exploration"
+
+streamableRenderTestState :: TestState -> Text
+streamableRenderTestState = \case
+  Open -> "open"
+  Large _ -> "large"
+  Passed -> "passed"
+  Unsolvable -> "unsolvable"
+  Solved -> "solved"
+  Failed _ -> "failed"
+
+streamableShrinkStatus :: TestState -> Text
+streamableShrinkStatus = \case
+  Open -> "idle"
+  Large _ -> "active"
+  Failed _ -> "failed"
+  _ -> "complete"
+
+streamableFullyShrunk :: TestState -> Bool
+streamableFullyShrunk = \case
+  Open -> False
+  Large _ -> False
+  _ -> True
+
+streamableObjectText :: Text -> Value -> Maybe Text
+streamableObjectText key = \case
+  Object o -> case KM.lookup (K.fromText key) o of
+    Just (String t) -> Just t
+    _ -> Nothing
+  _ -> Nothing
+
+recordStreamableEvent :: StreamableMCPState -> LocalTime -> Worker.CampaignEvent -> IO ()
+recordStreamableEvent st ts ev = do
+  let (wid, wtype, etype, payload) =
+        case ev of
+          Worker.WorkerEvent wid' wtype' e ->
+            (Just wid', Just (streamableWorkerTypeText wtype'), streamableWorkerEventType e, streamableWorkerPayload e)
+          Worker.Failure msg ->
+            (Nothing, Nothing, "Failure", toJSON msg)
+          Worker.ReproducerSaved f ->
+            (Nothing, Nothing, "ReproducerSaved", toJSON f)
+          Worker.ServerLog msg ->
+            (Nothing, Nothing, "ServerLog", toJSON msg)
+  atomicModifyIORef' st.streamableEventsRef $ \buf ->
+    let eventId = buf.streamableNextEventId
+        event = StreamableMCPEvent eventId (streamableFormatTimestamp ts) wid wtype etype payload
+        items' = buf.streamableEventItems <> [(eventId, event)]
+        overflow = length items' - st.streamableMaxEvents
+        trimmed = if overflow > 0 then drop overflow items' else items'
+    in (StreamableEventBuffer (eventId + 1) trimmed, ())
+
+streamableWorkerTypeText :: Worker.WorkerType -> Text
+streamableWorkerTypeText = \case
+  Worker.FuzzWorker -> "fuzz"
+  Worker.SymbolicWorker -> "symbolic"
+
+streamableWorkerEventType :: Worker.WorkerEvent -> Text
+streamableWorkerEventType = \case
+  Worker.TestFalsified _ -> "TestFalsified"
+  Worker.TestOptimized _ -> "TestOptimized"
+  Worker.NewCoverage {} -> "NewCoverage"
+  Worker.SymExecError _ -> "SymExecError"
+  Worker.SymExecLog _ -> "SymExecLog"
+  Worker.Log _ -> "Log"
+  Worker.TxSequenceReplayed {} -> "TxSequenceReplayed"
+  Worker.TxSequenceReplayFailed {} -> "TxSequenceReplayFailed"
+  Worker.WorkerStopped {} -> "WorkerStopped"
+
+streamableWorkerPayload :: Worker.WorkerEvent -> Value
+streamableWorkerPayload = \case
+  Worker.TestFalsified test -> toJSON test
+  Worker.TestOptimized test -> toJSON test
+  Worker.NewCoverage points numCodehashes corpusSize transactions -> object
+    [ "coverage" .= points
+    , "contracts" .= numCodehashes
+    , "corpus_size" .= corpusSize
+    , "transactions" .= transactions
+    ]
+  Worker.SymExecError msg -> object ["msg" .= msg]
+  Worker.SymExecLog msg -> object ["msg" .= msg]
+  Worker.Log msg -> object ["msg" .= msg]
+  Worker.TxSequenceReplayed file current total -> object
+    [ "file" .= file
+    , "current" .= current
+    , "total" .= total
+    ]
+  Worker.TxSequenceReplayFailed file tx -> object
+    [ "file" .= file
+    , "tx" .= tx
+    ]
+  Worker.WorkerStopped reason -> object ["reason" .= show reason]
+
+streamableArgsToMap :: Maybe Value -> Map Text Text
+streamableArgsToMap = \case
+  Just (Object o) -> Map.fromList $ map toPair (KM.toList o)
+  _ -> mempty
+  where
+    toPair (k, v) = (K.toText k, streamableQueryValueText v)
+
+streamableQueryValueText :: Value -> Text
+streamableQueryValueText = \case
+  String t -> t
+  Number n -> case floatingOrInteger n of
+    Left (d :: Double) -> T.pack (show d)
+    Right (i :: Integer) -> T.pack (show i)
+  Bool b -> if b then "true" else "false"
+  Null -> "null"
+  _ -> ""
+
+streamableReadQueryInt :: Text -> Int -> Map Text Text -> Int
+streamableReadQueryInt key def query =
+  case Map.lookup key query of
+    Nothing -> def
+    Just value -> Data.Maybe.fromMaybe def (readMaybe $ T.unpack value)
+
+streamableSplitUri :: Text -> (Text, Map Text Text)
+streamableSplitUri uri =
+  case T.breakOn "?" uri of
+    (path, qs) -> (path, streamableParseQuery $ T.drop 1 qs)
+
+streamableParseQuery :: Text -> Map Text Text
+streamableParseQuery qs =
+  Map.fromList $ map parsePair $ filter (not . T.null) (T.splitOn "&" qs)
+  where
+    parsePair p =
+      case T.splitOn "=" p of
+        (k:v:_) -> (k, v)
+        (k:_) -> (k, "")
+        _ -> ("", "")
+
+streamableFormatTimestamp :: LocalTime -> Text
+streamableFormatTimestamp = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S"
+
+fromMaybeNull :: Maybe Value -> Value
+fromMaybeNull = Data.Maybe.fromMaybe Null
+
+streamableMcpError :: Value -> Int -> Text -> Value
+streamableMcpError rid code msg = object
+  [ "jsonrpc" .= ("2.0" :: Text)
+  , "id" .= rid
+  , "error" .= object ["code" .= code, "message" .= msg]
+  ]
+
+streamableMcpResult :: Value -> Value -> Value
+streamableMcpResult rid res = object
+  [ "jsonrpc" .= ("2.0" :: Text)
+  , "id" .= rid
+  , "result" .= res
+  ]
