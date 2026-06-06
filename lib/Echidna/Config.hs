@@ -151,6 +151,7 @@ instance FromJSON EConfigWithUsage where
             <*> mcpObj .:? "reproducerResultTTLMinutes" .!= defaultMCPConf.reproducerResultTTLMinutes
             <*> mcpObj .:? "includeCallData" .!= defaultMCPConf.includeCallData
             <*> mcpObj .:? "maxReproducerJsonBytes" .!= defaultMCPConf.maxReproducerJsonBytes
+            <*> mcpObj .:? "maxRequestBytes" .!= defaultMCPConf.maxRequestBytes
         Just _ -> fail "mcp must be an object"
 
       solConfParser = SolConf

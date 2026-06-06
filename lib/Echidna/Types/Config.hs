@@ -53,6 +53,7 @@ data MCPConf = MCPConf
   , reproducerResultTTLMinutes :: Int
   , includeCallData        :: Bool
   , maxReproducerJsonBytes :: Int
+  , maxRequestBytes        :: Int
   } deriving (Show, Eq)
 
 defaultMCPConf :: MCPConf
@@ -71,6 +72,7 @@ defaultMCPConf = MCPConf
   , reproducerResultTTLMinutes = 120
   , includeCallData = False
   , maxReproducerJsonBytes = 256000
+  , maxRequestBytes = 65536
   }
 
 data OperationMode = Interactive | NonInteractive OutputFormat deriving (Show, Eq)

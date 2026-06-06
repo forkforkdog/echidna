@@ -1,7 +1,8 @@
 module Echidna where
 
-import Control.Concurrent (newChan)
+import Control.Concurrent (forkIO, newChan, readChan)
 import Control.Concurrent.STM (newBroadcastTChanIO)
+import Control.Monad (forever, void)
 import Control.Monad.Catch (MonadThrow(..))
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
@@ -126,6 +127,7 @@ mkEnv cfg buildOutput tests world slitherInfo = do
   codehashMap <- newIORef mempty
   chainId <- Onchain.fetchChainIdFrom cfg.rpcUrl
   eventQueue <- newChan
+  void . forkIO . forever $ readChan eventQueue
   bus <- newBroadcastTChanIO
   coverageRefInit <- newIORef mempty
   coverageRefRuntime <- newIORef mempty

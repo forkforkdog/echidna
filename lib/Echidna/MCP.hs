@@ -1,10 +1,12 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
 module Echidna.MCP where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Exception (SomeException, finally, try)
+import Control.DeepSeq (force)
+import Control.Exception (SomeException, evaluate, finally, try)
 import Control.Monad (forever, unless, void, when)
 import Control.Concurrent.STM
 import Control.Concurrent.Chan (dupChan, readChan)
@@ -12,8 +14,11 @@ import Data.Aeson (FromJSON(..), Result(..), ToJSON(..), Value(..), encode, from
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import Data.IORef (readIORef, modifyIORef', newIORef, IORef, atomicModifyIORef', writeIORef)
+import Data.Int (Int64)
 import Data.List (find, isPrefixOf, isSuffixOf, sort)
 import Data.Scientific (floatingOrInteger)
 import qualified Data.Maybe
@@ -52,8 +57,8 @@ import Echidna.Types.Campaign
   )
 import Echidna.Types.InterWorker (Bus, Message(..), WrappedMessage(..), AgentId(..), FuzzerCmd(..), BroadcastMsg(..))
 import Echidna.Types.Worker qualified as Worker
-import Network.HTTP.Types (ResponseHeaders, Status, hContentType, methodGet, methodPost, status200, status202, status404, status405)
-import Network.Wai (Application, Response, pathInfo, requestMethod, responseBuilder, responseLBS, strictRequestBody)
+import Network.HTTP.Types (ResponseHeaders, Status, hContentType, methodGet, methodPost, status200, status202, status404, status405, status413)
+import Network.Wai (Application, Response, getRequestBodyChunk, pathInfo, requestMethod, responseBuilder, responseLBS)
 import Network.Wai.Handler.Warp (runSettings, setHost, setPort, defaultSettings)
 
 -- | Status state to track coverage info
@@ -624,17 +629,18 @@ data StreamableMCPState = StreamableMCPState
   { streamableEventsRef :: IORef StreamableEventBuffer
   , streamableStartedAt :: UTCTime
   , streamableMaxEvents :: Int
+  , streamableMaxRequestBytes :: Int64
   , streamableCoverageRef :: IORef Value
   , streamableCoverageRefreshRef :: IORef Bool
   }
 
 data StreamableMCPEvent = StreamableMCPEvent
-  { streamableEventId :: Int
-  , streamableTimestamp :: Text
-  , streamableWorkerId :: Maybe Int
-  , streamableWorkerType :: Maybe Text
-  , streamableEventType :: Text
-  , streamablePayload :: Value
+  { streamableEventId :: !Int
+  , streamableTimestamp :: !Text
+  , streamableWorkerId :: !(Maybe Int)
+  , streamableWorkerType :: !(Maybe Text)
+  , streamableEventType :: !Text
+  , streamablePayload :: !Value
   }
 
 instance ToJSON StreamableMCPEvent where
@@ -664,7 +670,7 @@ runStreamableMCPServer env workerRefs = do
   coverageRef <- newIORef streamableEmptyCoverageLines
   coverageRefreshRef <- newIORef False
   let conf = env.cfg.mcpConf
-      st = StreamableMCPState eventsRef started (max 1 conf.maxEvents) coverageRef coverageRefreshRef
+      st = StreamableMCPState eventsRef started (max 1 conf.maxEvents) (fromIntegral $ max 1 conf.maxRequestBytes) coverageRef coverageRefreshRef
   ch <- dupChan env.eventQueue
   _ <- forkIO $ forever $ do
     (ts, ev) <- readChan ch
@@ -679,25 +685,42 @@ streamableMCPApp env workerRefs st req respond =
     (m, ["health"]) | m == methodGet ->
       respond $ responseLBS status200 jsonHeaders "{\"ok\":true}"
     (m, ["mcp"]) | m == methodPost -> do
-      body <- strictRequestBody req
-      case eitherDecodeValue body of
-        Left err ->
-          respond $ streamableJson status200 $ streamableMcpError Null (-32700) (T.pack err)
-        Right val ->
-          case fromJSON val of
-            Error err ->
-              respond $ streamableJson status200 $ streamableMcpError Null (-32600) (T.pack err)
-            Success rpc -> do
-              result <- handleStreamableRpc env workerRefs st rpc
-              case result of
-                Nothing -> respond $ responseBuilder status202 jsonHeaders mempty
-                Just val' -> respond $ streamableJson status200 val'
+      bodyResult <- streamableStrictRequestBodyWithLimit st.streamableMaxRequestBytes (getRequestBodyChunk req)
+      case bodyResult of
+        Left _ ->
+          respond $ streamableJson status413 $ streamableMcpError Null (-32000) "Request body too large"
+        Right body ->
+          case eitherDecodeValue body of
+            Left err ->
+              respond $ streamableJson status200 $ streamableMcpError Null (-32700) (T.pack err)
+            Right val ->
+              case fromJSON val of
+                Error err ->
+                  respond $ streamableJson status200 $ streamableMcpError Null (-32600) (T.pack err)
+                Success rpc -> do
+                  result <- handleStreamableRpc env workerRefs st rpc
+                  case result of
+                    Nothing -> respond $ responseBuilder status202 jsonHeaders mempty
+                    Just val' -> respond $ streamableJson status200 val'
     (_, ["mcp"]) ->
       respond $ responseLBS status405 jsonHeaders "{\"error\":\"method not allowed\"}"
     _ ->
       respond $ responseLBS status404 jsonHeaders "{\"error\":\"not found\"}"
   where
     eitherDecodeValue = Aeson.eitherDecode
+
+streamableStrictRequestBodyWithLimit :: Int64 -> IO BS.ByteString -> IO (Either Int64 BL.ByteString)
+streamableStrictRequestBodyWithLimit limit nextChunk = go 0 []
+  where
+    go !bytes chunks = do
+      chunk <- nextChunk
+      if BS.null chunk
+        then pure . Right . BL.fromChunks $ reverse chunks
+        else do
+          let !bytes' = bytes + fromIntegral (BS.length chunk)
+          if bytes' > limit
+            then pure (Left bytes')
+            else go bytes' (chunk : chunks)
 
 streamableJson :: Status -> Value -> Response
 streamableJson status val = responseLBS status jsonHeaders (encode val)
@@ -1107,7 +1130,7 @@ streamableObjectText key = \case
 
 recordStreamableEvent :: MCPConf -> StreamableMCPState -> LocalTime -> Worker.CampaignEvent -> IO ()
 recordStreamableEvent conf st ts ev = do
-  let (wid, wtype, etype, payload) =
+  let (wid, wtype, etype, payload0) =
         case ev of
           Worker.WorkerEvent wid' wtype' e ->
             (Just wid', Just (streamableWorkerTypeText wtype'), streamableWorkerEventType e, streamableWorkerPayload conf e)
@@ -1117,6 +1140,7 @@ recordStreamableEvent conf st ts ev = do
             (Nothing, Nothing, "ReproducerSaved", toJSON f)
           Worker.ServerLog msg ->
             (Nothing, Nothing, "ServerLog", toJSON msg)
+  payload <- evaluate (force payload0)
   atomicModifyIORef' st.streamableEventsRef $ \buf ->
     let eventId = buf.streamableNextEventId
         event = StreamableMCPEvent eventId (streamableFormatTimestamp ts) wid wtype etype payload
@@ -1146,11 +1170,12 @@ streamableWorkerPayload :: MCPConf -> Worker.WorkerEvent -> Value
 streamableWorkerPayload conf = \case
   Worker.TestFalsified test -> streamableEventTestPayload conf test
   Worker.TestOptimized test -> streamableEventTestPayload conf test
-  Worker.NewCoverage points numCodehashes corpusSize transactions -> object
+  Worker.NewCoverage points numCodehashes corpusSize _transactions -> object
     [ "coverage" .= points
     , "contracts" .= numCodehashes
     , "corpus_size" .= corpusSize
-    , "transactions" .= transactions
+    , "transactions" .= ([] :: [Value])
+    , "transactionsTruncated" .= True
     ]
   Worker.SymExecError msg -> object ["msg" .= msg]
   Worker.SymExecLog msg -> object ["msg" .= msg]

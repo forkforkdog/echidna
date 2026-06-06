@@ -179,6 +179,7 @@ data Options = Options
   , cliMcpReproducerResultTTLMinutes :: Maybe Int
   , cliMcpIncludeCallData :: Maybe Bool
   , cliMcpMaxReproducerJsonBytes :: Maybe Int
+  , cliMcpMaxRequestBytes :: Maybe Int
   , cliTestMode         :: Maybe TestMode
   , cliAllContracts     :: Bool
   , cliTimeout          :: Maybe Int
@@ -290,6 +291,9 @@ options = Options . NE.fromList
   <*> optional (option auto $ long "mcp-max-reproducer-json-bytes"
     <> metavar "N"
     <> help "Max JSON bytes for MCP reproducer responses.")
+  <*> optional (option auto $ long "mcp-max-request-bytes"
+    <> metavar "N"
+    <> help "Max bytes accepted for a single MCP HTTP request body.")
   <*> optional (option str $ long "test-mode"
     <> help "Test mode to use. Either 'property', 'assertion', 'foundry', 'optimization', 'overflow' or 'exploration'" )
   <*> switch (long "all-contracts"
@@ -413,6 +417,7 @@ overrideConfig config Options{..} = do
       , reproducerResultTTLMinutes = fromMaybe mcpConf.reproducerResultTTLMinutes cliMcpReproducerResultTTLMinutes
       , includeCallData = fromMaybe mcpConf.includeCallData cliMcpIncludeCallData
       , maxReproducerJsonBytes = fromMaybe mcpConf.maxReproducerJsonBytes cliMcpMaxReproducerJsonBytes
+      , maxRequestBytes = fromMaybe mcpConf.maxRequestBytes cliMcpMaxRequestBytes
       }
 
     overrideSolConf solConf = solConf

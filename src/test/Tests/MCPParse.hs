@@ -1,15 +1,18 @@
 module Tests.MCPParse (mcpParseTests) where
 
+import Control.Exception (ErrorCall, try)
 import Data.Aeson (Result(..), Value(..), encode, fromJSON)
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString qualified as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Maybe (isNothing, mapMaybe)
 import Data.Text qualified as T
-import Data.Time (UTCTime)
+import Data.Time (LocalTime, UTCTime)
 import Data.Vector qualified as Vector
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, testCase, (@?=))
+import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 
 import EVM.ABI (AbiType(..), AbiValue(..))
 
@@ -27,6 +30,11 @@ import Echidna.MCP
   , streamableResourcesList
   , streamableDecodeUriComponent
   , streamableStatusSnapshot
+  , StreamableEventBuffer(..)
+  , StreamableMCPEvent(..)
+  , StreamableMCPState(..)
+  , recordStreamableEvent
+  , streamableStrictRequestBodyWithLimit
   )
 import Echidna.Types.Config (MCPConf(..), defaultMCPConf)
 import Echidna.Types.Campaign (initialWorkerState)
@@ -57,6 +65,7 @@ mcpParseTests = testGroup "MCP parsing"
   , streamableResourceTests
   , streamablePayloadBoundTests
   , streamableStatusTests
+  , streamableReliabilityTests
   ]
 
 primitiveTests :: TestTree
@@ -220,6 +229,51 @@ streamableStatusTests = testGroup "streamable status"
       objectInt ["coveragePoints"] payload @?= Just 233468
   ]
 
+streamableReliabilityTests :: TestTree
+streamableReliabilityTests = testGroup "streamable MCP reliability"
+  [ testCase "request body reader accepts chunks within the configured limit" $ do
+      chunks <- newIORef [BS.replicate 3 65, BS.replicate 2 66, BS.empty]
+      result <- streamableStrictRequestBodyWithLimit 5 (nextBodyChunk chunks)
+      case result of
+        Right body -> do
+          LBS.length body @?= 5
+          readIORef chunks >>= (@?= [])
+        Left bytes -> assertFailure ("unexpected body rejection at " <> show bytes <> " bytes")
+  , testCase "request body reader rejects as soon as the configured limit is crossed" $ do
+      chunks <- newIORef [BS.replicate 4 65, BS.replicate 4 66, error "reader consumed after rejection"]
+      result <- streamableStrictRequestBodyWithLimit 5 (nextBodyChunk chunks)
+      result @?= Left 8
+  , testCase "event history is trimmed when events are recorded" $ do
+      st <- mkStreamableState 2
+      let ts = read "2026-06-06 00:00:00" :: LocalTime
+      mapM_ (\i -> recordStreamableEvent defaultMCPConf st ts (Worker.WorkerEvent i Worker.FuzzWorker (Worker.Log ("event-" <> show i)))) [0..2]
+      StreamableEventBuffer nextId items <- readIORef st.streamableEventsRef
+      nextId @?= 3
+      map fst items @?= [1, 2]
+  , testCase "event payloads are forced before insertion" $ do
+      st <- mkStreamableState 10
+      let ts = read "2026-06-06 00:00:00" :: LocalTime
+          event = Worker.WorkerEvent 0 Worker.FuzzWorker (Worker.Log (error "unforced event payload"))
+      result <- try (recordStreamableEvent defaultMCPConf st ts event) :: IO (Either ErrorCall ())
+      case result of
+        Left _ -> pure ()
+        Right _ -> assertFailure "expected recordStreamableEvent to force and reject the bad payload"
+      StreamableEventBuffer _ items <- readIORef st.streamableEventsRef
+      length items @?= 0
+  , testCase "new coverage events do not retain transaction arrays" $ do
+      st <- mkStreamableState 10
+      let ts = read "2026-06-06 00:00:00" :: LocalTime
+          event = Worker.WorkerEvent 0 Worker.FuzzWorker (Worker.NewCoverage 7 2 3 (error "transactions should not be retained"))
+      recordStreamableEvent defaultMCPConf st ts event
+      StreamableEventBuffer _ items <- readIORef st.streamableEventsRef
+      case items of
+        [(_, ev)] -> do
+          objectInt ["coverage"] ev.streamablePayload @?= Just 7
+          objectArrayLength ["transactions"] ev.streamablePayload @?= Just 0
+          objectBool ["transactionsTruncated"] ev.streamablePayload @?= Just True
+        _ -> assertFailure ("expected one retained event, got " <> show (length items))
+  ]
+
 mkStreamableTest :: Int -> EchidnaTest
 mkStreamableTest txCount = EchidnaTest
   { state = Large 0
@@ -270,3 +324,17 @@ objectInt [] (Number n) =
 objectInt (key:keys) (Object o) =
   KM.lookup (K.fromText key) o >>= objectInt keys
 objectInt _ _ = Nothing
+
+mkStreamableState :: Int -> IO StreamableMCPState
+mkStreamableState maxEvents = do
+  eventsRef <- newIORef (StreamableEventBuffer 0 [])
+  coverageRef <- newIORef (Object mempty)
+  refreshingRef <- newIORef False
+  let started = read "2026-06-06 00:00:00 UTC" :: UTCTime
+  pure $ StreamableMCPState eventsRef started maxEvents 65536 coverageRef refreshingRef
+
+nextBodyChunk :: IORef [BS.ByteString] -> IO BS.ByteString
+nextBodyChunk ref =
+  atomicModifyIORef' ref $ \case
+    [] -> ([], BS.empty)
+    chunk:rest -> (rest, chunk)
