@@ -1,11 +1,12 @@
 module Tests.MCPParse (mcpParseTests) where
 
-import Data.Aeson (Value(..), encode)
+import Data.Aeson (Result(..), Value(..), encode, fromJSON)
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (isNothing, mapMaybe)
 import Data.Text qualified as T
+import Data.Time (UTCTime)
 import Data.Vector qualified as Vector
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -25,8 +26,10 @@ import Echidna.MCP
   , streamableWorkerPayload
   , streamableResourcesList
   , streamableDecodeUriComponent
+  , streamableStatusSnapshot
   )
 import Echidna.Types.Config (MCPConf(..), defaultMCPConf)
+import Echidna.Types.Campaign (initialWorkerState)
 import Echidna.Types.Test (EchidnaTest(..), TestState(..), TestType(..), TestValue(..))
 import Echidna.Types.Tx (Tx(..), TxCall(..), TxResult(..))
 import Echidna.Types.Worker qualified as Worker
@@ -53,6 +56,7 @@ mcpParseTests = testGroup "MCP parsing"
   , splitArgsTests
   , streamableResourceTests
   , streamablePayloadBoundTests
+  , streamableStatusTests
   ]
 
 primitiveTests :: TestTree
@@ -204,6 +208,18 @@ streamablePayloadBoundTests = testGroup "streamable payload bounds"
       objectBool ["reproducer", "truncated"] artifact @?= Just True
   ]
 
+streamableStatusTests :: TestTree
+streamableStatusTests = testGroup "streamable status"
+  [ testCase "keeps counters coherent when failures are visible before worker callback" $ do
+      let now = read "2026-06-06 00:00:00 UTC" :: UTCTime
+          payload = streamableStatusSnapshot now now [initialWorkerState] 15 15 233468 4 2
+      objectInt ["runs"] payload @?= Just 15
+      objectInt ["counters", "totalCalls"] payload @?= Just 15
+      objectInt ["counters", "successCalls"] payload @?= Just 0
+      objectInt ["counters", "failedCalls"] payload @?= Just 15
+      objectInt ["coveragePoints"] payload @?= Just 233468
+  ]
+
 mkStreamableTest :: Int -> EchidnaTest
 mkStreamableTest txCount = EchidnaTest
   { state = Large 0
@@ -243,3 +259,14 @@ objectBool [] (Bool b) = Just b
 objectBool (key:keys) (Object o) =
   KM.lookup (K.fromText key) o >>= objectBool keys
 objectBool _ _ = Nothing
+
+objectInt :: [T.Text] -> Value -> Maybe Int
+objectInt [] (Number n) =
+  let decoded :: Result Int
+      decoded = fromJSON (Number n)
+  in case decoded of
+       Success i -> Just i
+       Error _ -> Nothing
+objectInt (key:keys) (Object o) =
+  KM.lookup (K.fromText key) o >>= objectInt keys
+objectInt _ _ = Nothing

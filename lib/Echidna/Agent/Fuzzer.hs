@@ -36,7 +36,7 @@ import EVM.ABI (AbiValue)
 import Echidna.ABI (GenDict(..))
 import Echidna.Events (extractEvents)
 import Echidna.Exec (execTx)
-import Echidna.Execution (replayCorpus, callseq, updateTests)
+import Echidna.Execution (replayCorpus, callseqWithStateFlush, updateTests)
 import Echidna.UI.Report (ppTx)
 import Echidna.Mutator.Corpus (getCorpusMutation, seqMutatorsStateless, seqMutatorsStateful, fromConsts)
 import Echidna.Shrink (shrinkTest)
@@ -102,7 +102,7 @@ instance Agent FuzzerAgent where
              flip runStateT initialState $ do
                liftIO $ pushCampaignEvent env (WorkerEvent workerId FuzzWorker (Worker.Log ("Starting FuzzerAgent " ++ show workerId)))
                callback
-               void $ replayCorpus vm corpus
+               void $ replayCorpus callback vm corpus
                workerChan <- liftIO $ atomically $ dupTChan bus
                fuzzerLoop callback vm limit workerChan
 
@@ -181,7 +181,7 @@ fuzzerLoop callback vm testLimit bus = do
        | otherwise ->
          callback >> pure TestLimitReached
 
-  fuzz = randseq vm.env.contracts >>= fmap fst . (\txs -> callseq vm txs False)
+  fuzz = randseq vm.env.contracts >>= fmap fst . (\txs -> callseqWithStateFlush callback vm txs False)
 
   shrink = do
     wid <- gets (.workerId)

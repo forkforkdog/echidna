@@ -51,17 +51,18 @@ import Echidna.Worker (pushWorkerEvent)
 -- contain minimized corpus without sequences that didn't increase the coverage.
 replayCorpus
   :: (MonadIO m, MonadThrow m, MonadRandom m, MonadReader Env m, MonadState WorkerState m)
-  => VM Concrete -- ^ VM to start replaying from
+  => m () -- ^ Publish the current worker state
+  -> VM Concrete -- ^ VM to start replaying from
   -> [(FilePath, [Tx])] -- ^ corpus to replay
   -> m ()
-replayCorpus vm txSeqs =
+replayCorpus publishState vm txSeqs =
   forM_ (zip [1..] txSeqs) $ \(i, (file, txSeq)) -> do
     let maybeFaultyTx =
           List.find (\tx -> LitAddr tx.dst `notElem` Map.keys vm.env.contracts) $
             List.filter (\case Tx { call = NoCall } -> False; _ -> True) txSeq
     case maybeFaultyTx of
       Nothing -> do
-        _ <- callseq vm txSeq True
+        _ <- callseqWithStateFlush publishState vm txSeq True
         pushWorkerEvent (TxSequenceReplayed file i (length txSeqs))
       Just faultyTx ->
         pushWorkerEvent (TxSequenceReplayFailed file faultyTx)
@@ -75,7 +76,16 @@ callseq
   -> [Tx]
   -> Bool
   -> m (VM Concrete, Bool)
-callseq vm txSeq isReplaying = do
+callseq = callseqWithStateFlush (pure ())
+
+callseqWithStateFlush
+  :: (MonadIO m, MonadThrow m, MonadRandom m, MonadReader Env m, MonadState WorkerState m)
+  => m ()
+  -> VM Concrete
+  -> [Tx]
+  -> Bool
+  -> m (VM Concrete, Bool)
+callseqWithStateFlush publishState vm txSeq isReplaying = do
   env <- ask
   -- First, we figure out whether we need to execute with or without coverage
   -- optimization and gas info, and pick our execution function appropriately
@@ -86,7 +96,7 @@ callseq vm txSeq isReplaying = do
 
   -- Run each call sequentially. This gives us the result of each call
   -- and the new state
-  (results, vm') <- evalSeq vm execFunc txSeq
+  (results, vm') <- evalSeq publishState vm execFunc txSeq
 
   -- Update sample stats for any tracked functions. Off the hot path when
   -- no functions are sampled (the common case).
@@ -239,16 +249,18 @@ execTxOptC vm tx = do
 -- of transactions, constantly checking if we've solved any tests.
 evalSeq
   :: (MonadIO m, MonadThrow m, MonadRandom m, MonadReader Env m, MonadState WorkerState m)
-  => VM Concrete -- ^ Initial VM
+  => m () -- ^ Publish the current worker state
+  -> VM Concrete -- ^ Initial VM
   -> (VM Concrete -> Tx -> m (result, VM Concrete))
   -> [Tx]
   -> m ([(Tx, result)], VM Concrete)
-evalSeq vm0 execFunc = go vm0 [] where
+evalSeq publishState vm0 execFunc = go vm0 [] where
   go vm executedSoFar toExecute = do
     -- NOTE: we do reverse here because we build up this list by prepending,
     -- see the last line of this function.
     updateTests (updateOpenTest vm (reverse executedSoFar))
     modify' $ \workerState -> workerState { ncalls = workerState.ncalls + 1 }
+    publishState
     case toExecute of
       [] -> pure ([], vm)
       (tx:remainingTxs) -> do

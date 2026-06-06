@@ -3,8 +3,9 @@
 
 module Echidna.MCP where
 
-import Control.Concurrent (forkIO)
-import Control.Monad (forever, unless)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Exception (SomeException, finally, try)
+import Control.Monad (forever, unless, void, when)
 import Control.Concurrent.STM
 import Control.Concurrent.Chan (dupChan, readChan)
 import Data.Aeson (FromJSON(..), Result(..), ToJSON(..), Value(..), encode, fromJSON, object, toJSON, withObject, (.:), (.:?), (.=))
@@ -12,7 +13,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import qualified Data.ByteString.Lazy.Char8 as BL8
-import Data.IORef (readIORef, modifyIORef', newIORef, IORef, atomicModifyIORef')
+import Data.IORef (readIORef, modifyIORef', newIORef, IORef, atomicModifyIORef', writeIORef)
 import Data.List (find, isPrefixOf, isSuffixOf, sort)
 import Data.Scientific (floatingOrInteger)
 import qualified Data.Maybe
@@ -623,6 +624,8 @@ data StreamableMCPState = StreamableMCPState
   { streamableEventsRef :: IORef StreamableEventBuffer
   , streamableStartedAt :: UTCTime
   , streamableMaxEvents :: Int
+  , streamableCoverageRef :: IORef Value
+  , streamableCoverageRefreshRef :: IORef Bool
   }
 
 data StreamableMCPEvent = StreamableMCPEvent
@@ -658,12 +661,15 @@ runStreamableMCPServer :: Env -> [IORef WorkerState] -> IO ()
 runStreamableMCPServer env workerRefs = do
   started <- getCurrentTime
   eventsRef <- newIORef (StreamableEventBuffer 0 [])
+  coverageRef <- newIORef streamableEmptyCoverageLines
+  coverageRefreshRef <- newIORef False
   let conf = env.cfg.mcpConf
-      st = StreamableMCPState eventsRef started (max 1 conf.maxEvents)
+      st = StreamableMCPState eventsRef started (max 1 conf.maxEvents) coverageRef coverageRefreshRef
   ch <- dupChan env.eventQueue
   _ <- forkIO $ forever $ do
     (ts, ev) <- readChan ch
     recordStreamableEvent conf st ts ev
+    streamableMaybeRefreshCoverage env st ev
   let settings = setPort conf.port . setHost (fromString $ T.unpack conf.host) $ defaultSettings
   runSettings settings (streamableMCPApp env workerRefs st)
 
@@ -814,7 +820,7 @@ runStreamableTool env workerRefs st name args =
     "get_events" -> streamableEvents st (streamableArgsToMap args)
     "get_reproducers" -> streamableReproducers env (streamableArgsToMap args)
     "get_reproducer" -> streamableReproducer env (streamableArgsToMap args)
-    "get_coverage_hits" -> streamableCoverageLines env
+    "get_coverage_hits" -> streamableCoverageLines env st
     _ -> pure $ object ["error" .= ("unknown tool" :: Text)]
 
 readStreamableResource :: Env -> [IORef WorkerState] -> StreamableMCPState -> Text -> IO Value
@@ -823,7 +829,7 @@ readStreamableResource env workerRefs st uri =
     ("echidna://run/status", _) -> streamableStatus env workerRefs st
     ("echidna://run/events", query) -> streamableEvents st query
     ("echidna://run/reproducers", query) -> streamableReproducers env query
-    ("echidna://coverage/lines", _) -> streamableCoverageLines env
+    ("echidna://coverage/lines", _) -> streamableCoverageLines env st
     (path, _) | "echidna://run/reproducer/" `T.isPrefixOf` path ->
       streamableReproducer env (Map.singleton "testKey" (streamableDecodeUriComponent $ T.drop (T.length "echidna://run/reproducer/") path))
     _ -> pure $ object ["error" .= ("unknown resource" :: Text)]
@@ -835,25 +841,32 @@ streamableStatus env workerRefs st = do
   corpus <- readIORef env.corpusRef
   (points, codehashes) <- coverageStats env.coverageRefInit env.coverageRefRuntime
   now <- getCurrentTime
-  let runs = sum $ map (.ncalls) workers
-      failedTests = length $ filter didFail tests
-      elapsedMs = floor (realToFrac (diffUTCTime now st.streamableStartedAt) * (1000 :: Double))
-  pure $ object
+  let failedTests = length $ filter didFail tests
+      corpusSize = Set.size corpus
+  pure $ streamableStatusSnapshot st.streamableStartedAt now workers failedTests (length tests) points codehashes corpusSize
+
+streamableStatusSnapshot :: UTCTime -> UTCTime -> [WorkerState] -> Int -> Int -> Int -> Int -> Int -> Value
+streamableStatusSnapshot startedAt now workers failedTests totalTests points codehashes corpusSize =
+  let rawRuns = sum $ map (.ncalls) workers
+      runs = max rawRuns failedTests
+      successCalls = max 0 (runs - failedTests)
+      elapsedMs = floor (realToFrac (diffUTCTime now startedAt) * (1000 :: Double))
+  in object
     [ "phase" .= ("running" :: Text)
     , "runs" .= runs
     , "counters" .= object
         [ "totalCalls" .= runs
-        , "successCalls" .= (runs - failedTests)
+        , "successCalls" .= successCalls
         , "failedCalls" .= failedTests
         ]
     , "coveragePoints" .= points
     , "uniqueCodehashes" .= codehashes
-    , "corpusSize" .= Set.size corpus
+    , "corpusSize" .= corpusSize
     , "tests" .= object
-        [ "total" .= length tests
+        [ "total" .= totalTests
         , "failed" .= failedTests
         ]
-    , "corpus" .= object ["size" .= Set.size corpus]
+    , "corpus" .= object ["size" .= corpusSize]
     , "elapsedMs" .= (max 0 elapsedMs :: Int)
     ]
 
@@ -889,12 +902,67 @@ streamableReproducer env query = do
     Just artifact -> pure $ object ["testKey" .= streamableObjectText "testKey" artifact, "artifact" .= artifact]
     Nothing -> pure $ object ["error" .= ("reproducer not found" :: Text)]
 
-streamableCoverageLines :: Env -> IO Value
-streamableCoverageLines env = do
+streamableCoverageTimeoutUsec :: Int
+streamableCoverageTimeoutUsec = 30000000
+
+streamableCoveragePollUsec :: Int
+streamableCoveragePollUsec = 100000
+
+streamableEmptyCoverageLines :: Value
+streamableEmptyCoverageLines = object []
+
+streamableCoverageLines :: Env -> StreamableMCPState -> IO Value
+streamableCoverageLines env st = do
+  cached <- readIORef st.streamableCoverageRef
+  if not (streamableIsEmptyCoverageLines cached)
+    then pure cached
+    else do
+      streamableStartCoverageRefresh env st
+      streamableWaitForCoverageSnapshot st
+
+streamableWaitForCoverageSnapshot :: StreamableMCPState -> IO Value
+streamableWaitForCoverageSnapshot st = do
+  waited <- timeout streamableCoverageTimeoutUsec waitLoop
+  case waited of
+    Just snapshot -> pure snapshot
+    Nothing -> readIORef st.streamableCoverageRef
+  where
+    waitLoop = do
+      cached <- readIORef st.streamableCoverageRef
+      refreshing <- readIORef st.streamableCoverageRefreshRef
+      if not (streamableIsEmptyCoverageLines cached) || not refreshing
+        then pure cached
+        else threadDelay streamableCoveragePollUsec >> waitLoop
+
+streamableComputeCoverageLines :: Env -> IO Value
+streamableComputeCoverageLines env = do
   covMap <- mergeCoverageMaps env.dapp env.coverageRefInit env.coverageRefRuntime
   let contracts = Map.elems env.dapp.solcByName
       hits = coverageLineHits env.sourceCache covMap contracts env.cfg.campaignConf.coverageExcludes
-  pure $ toJSON hits
+      snapshot = toJSON hits
+  BL8.length (encode snapshot) `seq` pure snapshot
+
+streamableStartCoverageRefresh :: Env -> StreamableMCPState -> IO ()
+streamableStartCoverageRefresh env st = do
+  shouldStart <- atomicModifyIORef' st.streamableCoverageRefreshRef $ \running ->
+    if running then (running, False) else (True, True)
+  when shouldStart $ void $ forkIO $
+    (do
+      computed <- try (streamableComputeCoverageLines env) :: IO (Either SomeException Value)
+      case computed of
+        Right snapshot -> writeIORef st.streamableCoverageRef snapshot
+        _ -> pure ())
+    `finally` writeIORef st.streamableCoverageRefreshRef False
+
+streamableMaybeRefreshCoverage :: Env -> StreamableMCPState -> Worker.CampaignEvent -> IO ()
+streamableMaybeRefreshCoverage env st = \case
+  Worker.WorkerEvent _ _ Worker.NewCoverage{} -> streamableStartCoverageRefresh env st
+  _ -> pure ()
+
+streamableIsEmptyCoverageLines :: Value -> Bool
+streamableIsEmptyCoverageLines = \case
+  Object o -> KM.null o
+  _ -> False
 
 streamableTestArtifact :: MCPConf -> Int -> EchidnaTest -> Value
 streamableTestArtifact conf idx test =
