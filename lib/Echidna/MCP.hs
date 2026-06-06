@@ -7,7 +7,8 @@ module Echidna.MCP where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.DeepSeq (force)
 import Control.Exception (SomeException, displayException, evaluate, finally, try)
-import Control.Monad (forever, unless, void, when)
+import Control.Monad (foldM, forever, unless, void, when, zipWithM)
+import Control.Monad.Reader (runReaderT)
 import Control.Concurrent.STM
 import Control.Concurrent.Chan (dupChan, readChan)
 import Data.Aeson (FromJSON(..), Result(..), ToJSON(..), Value(..), encode, fromJSON, object, toJSON, withObject, (.:), (.:?), (.=))
@@ -40,11 +41,13 @@ import Data.String (fromString)
 import MCP.Server
 import EVM.Dapp (DappInfo(..))
 import EVM.Solidity (SolcContract(..), Method(..))
-import EVM.Types (Addr, W256)
+import EVM.Types (Addr, VM, VMType(Concrete), W256)
 import EVM.ABI (AbiValue(..), AbiType(..), abiValueType)
-import Echidna.Types.Test (EchidnaTest(..), TestState(..), TestType(..), didFail, isOptimizationTest)
+import Echidna.Exec (execTx)
+import Echidna.Test (checkETest, getResultFromVM)
+import Echidna.Types.Test (EchidnaTest(..), TestState(..), TestType(..), TestValue(..), didFail, isOptimizationTest)
 import Echidna.Types.Solidity (SolConf(..))
-import Echidna.Types.Tx (Tx(..), TxCall(..), maxGasPerBlock)
+import Echidna.Types.Tx (Tx(..), TxCall(..), TxResult, maxGasPerBlock)
 import Echidna.Types.Coverage (CoverageFileType(..), mergeCoverageMaps, coverageStats)
 import Echidna.Output.Source (coverageLineHits, ppCoveredCode, saveLcovHook)
 import Echidna.Output.Corpus (loadTxs)
@@ -632,6 +635,7 @@ data StreamableMCPState = StreamableMCPState
   , streamableMaxRequestBytes :: Int64
   , streamableCoverageRef :: IORef Value
   , streamableCoverageRefreshRef :: IORef Bool
+  , streamableInitialVm :: Maybe (VM Concrete)
   }
 
 data StreamableMCPEvent = StreamableMCPEvent
@@ -666,19 +670,19 @@ instance FromJSON StreamableRpcRequest where
       fail "jsonrpc must be \"2.0\""
     StreamableRpcRequest <$> o .:? "id" <*> o .: "method" <*> o .:? "params"
 
-runStreamableMCPServer :: Env -> [IORef WorkerState] -> IO ()
-runStreamableMCPServer env workerRefs = do
+runStreamableMCPServer :: Env -> VM Concrete -> [IORef WorkerState] -> IO ()
+runStreamableMCPServer env initialVm workerRefs = do
   started <- getCurrentTime
   eventsRef <- newIORef (StreamableEventBuffer 0 [])
   coverageRef <- newIORef streamableEmptyCoverageLines
   coverageRefreshRef <- newIORef False
   let conf = env.cfg.mcpConf
-      st = StreamableMCPState eventsRef started (max 1 conf.maxEvents) (fromIntegral $ max 1 conf.maxRequestBytes) coverageRef coverageRefreshRef
+      st = StreamableMCPState eventsRef started (max 1 conf.maxEvents) (fromIntegral $ max 1 conf.maxRequestBytes) coverageRef coverageRefreshRef (Just initialVm)
   ch <- dupChan env.eventQueue
   _ <- forkIO $ forever $ do
     (ts, ev) <- readChan ch
     result <- try (do
-      recordStreamableEvent conf st ts ev
+      recordVerifiedStreamableEvent env initialVm conf st ts ev
       streamableMaybeRefreshCoverage env st ev
       ) :: IO (Either SomeException ())
     case result of
@@ -924,11 +928,11 @@ runStreamableTool env workerRefs st name args =
     "get_reproducers" ->
       case parseStreamableArgs args >>= validateStreamableReproducersArgs env.cfg.mcpConf of
         Left msg -> pure $ StreamableToolError msg
-        Right parsed -> StreamableToolOk <$> streamableReproducers env parsed
+        Right parsed -> StreamableToolOk <$> streamableReproducers env st parsed
     "get_reproducer" ->
       case parseStreamableArgs args of
         Left msg -> pure $ StreamableToolError msg
-        Right parsed -> either StreamableToolError StreamableToolOk <$> streamableReproducer env parsed
+        Right parsed -> either StreamableToolError StreamableToolOk <$> streamableReproducer env st parsed
     "get_coverage_hits" -> StreamableToolOk <$> streamableCoverageLines env st
     _ -> pure $ StreamableToolRpcError (-32602) ("Unknown tool: " <> name)
 
@@ -943,10 +947,10 @@ readStreamableResource env workerRefs st uri =
     ("echidna://run/reproducers", query) ->
       case streamableReproducersArgsFromQuery env.cfg.mcpConf query of
         Left msg -> pure $ Left msg
-        Right parsed -> Right <$> streamableReproducers env parsed
+        Right parsed -> Right <$> streamableReproducers env st parsed
     ("echidna://coverage/lines", _) -> Right <$> streamableCoverageLines env st
     (path, _) | "echidna://run/reproducer/" `T.isPrefixOf` path ->
-      streamableReproducer env (StreamableReproducerArgs . streamableDecodeUriComponent $ T.drop (T.length "echidna://run/reproducer/") path)
+      streamableReproducer env st (StreamableReproducerArgs . streamableDecodeUriComponent $ T.drop (T.length "echidna://run/reproducer/") path)
     _ -> pure . Left $ "Unknown resource: " <> uri
 
 streamableStatus :: Env -> [IORef WorkerState] -> StreamableMCPState -> IO Value
@@ -1064,13 +1068,15 @@ streamableTakeLast limit xs
   | limit <= 0 = []
   | otherwise = drop (length xs - limit) xs
 
-streamableReproducers :: Env -> StreamableReproducersArgs -> IO Value
-streamableReproducers env args = do
+streamableReproducers :: Env -> StreamableMCPState -> StreamableReproducersArgs -> IO Value
+streamableReproducers env st args = do
   tests <- mapM readIORef env.testRefs
   let offset = Data.Maybe.fromMaybe 0 args.reproducersOffset
       maxArtifacts = max 0 env.cfg.mcpConf.maxReproducerArtifacts
       limit = min maxArtifacts $ Data.Maybe.fromMaybe maxArtifacts args.reproducersLimit
-      artifacts = filter streamableArtifactIsInteresting (zipWith (streamableTestArtifact env.cfg.mcpConf) [0..] tests)
+  artifacts <- filter streamableArtifactIsInteresting <$>
+    zipWithM (streamableVerifiedTestArtifact env st env.cfg.mcpConf) [0..] tests
+  let
       selected = take limit (drop offset artifacts)
   pure $ object
     [ "reproducers" .= selected
@@ -1078,11 +1084,11 @@ streamableReproducers env args = do
     , "nextOffset" .= (offset + length selected)
     ]
 
-streamableReproducer :: Env -> StreamableReproducerArgs -> IO (Either Text Value)
-streamableReproducer env args = do
+streamableReproducer :: Env -> StreamableMCPState -> StreamableReproducerArgs -> IO (Either Text Value)
+streamableReproducer env st args = do
   tests <- mapM readIORef env.testRefs
-  let artifacts = zipWith (streamableTestArtifact env.cfg.mcpConf) [0..] tests
-      matchKey artifact = Just args.reproducerTestKey == streamableObjectText "testKey" artifact
+  artifacts <- zipWithM (streamableVerifiedTestArtifact env st env.cfg.mcpConf) [0..] tests
+  let matchKey artifact = Just args.reproducerTestKey == streamableObjectText "testKey" artifact
   case find matchKey artifacts of
     Just artifact -> pure . Right $ object ["testKey" .= streamableObjectText "testKey" artifact, "artifact" .= artifact]
     Nothing -> pure . Left $ "Reproducer not found: " <> args.reproducerTestKey
@@ -1151,45 +1157,72 @@ streamableIsEmptyCoverageLines = \case
 
 streamableTestArtifact :: MCPConf -> Int -> EchidnaTest -> Value
 streamableTestArtifact conf idx test =
+  streamableTestArtifactWithTrust conf idx test (streamableUnverifiedReproducerTrust test.state "not-replayed")
+
+streamableVerifiedTestArtifact :: Env -> StreamableMCPState -> MCPConf -> Int -> EchidnaTest -> IO Value
+streamableVerifiedTestArtifact env st conf idx test =
+  case st.streamableInitialVm of
+    Nothing ->
+      pure $ streamableTestArtifactWithTrust conf idx test (streamableUnverifiedReproducerTrust test.state "initial-vm-unavailable")
+    Just initialVm -> do
+      let originalLength = length test.reproducer
+          shaped = streamableShapeTxs conf test.reproducer
+          countTruncated = length shaped < originalLength
+          provisionalTrust = streamableUnverifiedReproducerTrust test.state "pending-replay"
+          provisional artifactTxs artifactBytesTruncated =
+            streamableTestArtifactValue conf idx test artifactTxs countTruncated artifactBytesTruncated provisionalTrust
+          (txs, bytesTruncated) = streamableBoundTxsByJsonBytes conf provisional shaped
+      verification <- streamableVerifyReproducer env initialVm test txs
+      let deliveredTxs = if verification.verified then txs else []
+          trust = streamableReproducerTrust test.state verification
+      pure $ streamableTestArtifactValue conf idx test deliveredTxs countTruncated bytesTruncated trust
+
+streamableTestArtifactWithTrust :: MCPConf -> Int -> EchidnaTest -> Value -> Value
+streamableTestArtifactWithTrust conf idx test trust =
   let originalLength = length test.reproducer
       shaped = streamableShapeTxs conf test.reproducer
       countTruncated = length shaped < originalLength
-      key = T.intercalate ":" ["test", T.pack (show idx), streamableRenderTestType test.testType]
-      testId = streamableRenderTestId test
       mkArtifact artifactTxs artifactBytesTruncated =
-        let truncated = countTruncated || artifactBytesTruncated || length artifactTxs < length shaped
-            redacted = not conf.includeCallData && not (null artifactTxs)
-        in object
-          [ "testKey" .= key
-          , "testId" .= testId
-          , "workerId" .= test.workerId
-          , "testType" .= streamableRenderTestType test.testType
-          , "state" .= streamableRenderTestState test.state
-          , "reproducer" .= object
-              [ "latest" .= artifactTxs
-              , "best" .= artifactTxs
-              , "candidate" .= artifactTxs
-              , "length" .= object
-                  [ "latest" .= length artifactTxs
-                  , "best" .= length artifactTxs
-                  , "candidate" .= length artifactTxs
-                  ]
-              , "originalLength" .= originalLength
-              , "returnedLength" .= length artifactTxs
-              , "truncated" .= truncated
-              , "redacted" .= redacted
-              , "callDataPolicy" .= (if conf.includeCallData then ("included" :: Text) else "redacted")
-              , "requiresTransactions" .= not (null artifactTxs)
-              , "maxJsonBytes" .= conf.maxReproducerJsonBytes
-              , "trust" .= streamableReproducerTrust test.state
-              ]
-          , "shrink" .= object
-              [ "status" .= streamableShrinkStatus test.state
-              , "fullyShrunk" .= streamableFullyShrunk test.state
-              ]
-          ]
+        streamableTestArtifactValue conf idx test artifactTxs countTruncated artifactBytesTruncated trust
       (txs, bytesTruncated) = streamableBoundTxsByJsonBytes conf mkArtifact shaped
   in mkArtifact txs bytesTruncated
+
+streamableTestArtifactValue :: MCPConf -> Int -> EchidnaTest -> [Tx] -> Bool -> Bool -> Value -> Value
+streamableTestArtifactValue conf idx test artifactTxs countTruncated artifactBytesTruncated trust =
+  let key = T.intercalate ":" ["test", T.pack (show idx), streamableRenderTestType test.testType]
+      originalLength = length test.reproducer
+      shaped = streamableShapeTxs conf test.reproducer
+      truncated = countTruncated || artifactBytesTruncated || length artifactTxs < length shaped
+      redacted = not conf.includeCallData && not (null artifactTxs)
+  in object
+    [ "testKey" .= key
+    , "testId" .= streamableRenderTestId test
+    , "workerId" .= test.workerId
+    , "testType" .= streamableRenderTestType test.testType
+    , "state" .= streamableRenderTestState test.state
+    , "reproducer" .= object
+        [ "latest" .= artifactTxs
+        , "best" .= artifactTxs
+        , "candidate" .= artifactTxs
+        , "length" .= object
+            [ "latest" .= length artifactTxs
+            , "best" .= length artifactTxs
+            , "candidate" .= length artifactTxs
+            ]
+        , "originalLength" .= originalLength
+        , "returnedLength" .= length artifactTxs
+        , "truncated" .= truncated
+        , "redacted" .= redacted
+        , "callDataPolicy" .= (if conf.includeCallData then ("included" :: Text) else "redacted")
+        , "requiresTransactions" .= not (null artifactTxs)
+        , "maxJsonBytes" .= conf.maxReproducerJsonBytes
+        , "trust" .= trust
+        ]
+    , "shrink" .= object
+        [ "status" .= streamableShrinkStatus test.state
+        , "fullyShrunk" .= streamableFullyShrunk test.state
+        ]
+    ]
 
 streamableBoundTxsByJsonBytes :: MCPConf -> ([Tx] -> Bool -> Value) -> [Tx] -> ([Tx], Bool)
 streamableBoundTxsByJsonBytes conf mkValue txs
@@ -1208,61 +1241,117 @@ streamableBoundTxsByJsonBytes conf mkValue txs
 
 streamableEventTestPayload :: MCPConf -> EchidnaTest -> Value
 streamableEventTestPayload conf test =
+  streamableEventTestPayloadWithTrust conf test (streamableUnverifiedEventReproducerTrust test.state "not-replayed")
+
+streamableVerifiedEventTestPayload :: Env -> VM Concrete -> MCPConf -> EchidnaTest -> IO Value
+streamableVerifiedEventTestPayload env initialVm conf test = do
+  let originalLength = length test.reproducer
+      shaped = streamableShapeTxsLimit conf conf.reproducerEventsLimit test.reproducer
+      countTruncated = length shaped < originalLength
+      provisionalTrust = streamableUnverifiedEventReproducerTrust test.state "pending-replay"
+      provisional payloadTxs payloadBytesTruncated =
+        streamableEventTestPayloadValue conf test payloadTxs countTruncated payloadBytesTruncated provisionalTrust
+      (txs, bytesTruncated) = streamableBoundTxsByJsonBytes conf provisional shaped
+  verification <- streamableVerifyReproducer env initialVm test txs
+  let deliveredTxs = if verification.verified then txs else []
+      trust = streamableEventReproducerTrust test.state verification
+  pure $ streamableEventTestPayloadValue conf test deliveredTxs countTruncated bytesTruncated trust
+
+streamableEventTestPayloadWithTrust :: MCPConf -> EchidnaTest -> Value -> Value
+streamableEventTestPayloadWithTrust conf test trust =
   let originalLength = length test.reproducer
       shaped = streamableShapeTxsLimit conf conf.reproducerEventsLimit test.reproducer
       countTruncated = length shaped < originalLength
       mkPayload payloadTxs payloadBytesTruncated =
-        let truncated = countTruncated || payloadBytesTruncated || length payloadTxs < length shaped
-            redacted = not conf.includeCallData && not (null payloadTxs)
-        in object
-          [ "state" .= test.state
-          , "type" .= test.testType
-          , "value" .= test.value
-          , "reproducer" .= payloadTxs
-          , "result" .= test.result
-          , "reproducerLength" .= object
-              [ "original" .= originalLength
-              , "returned" .= length payloadTxs
-              ]
-          , "truncated" .= truncated
-          , "redacted" .= redacted
-          , "callDataPolicy" .= (if conf.includeCallData then ("included" :: Text) else "redacted")
-          , "maxJsonBytes" .= conf.maxReproducerJsonBytes
-          , "reproducerTrust" .= streamableEventReproducerTrust
-          ]
+        streamableEventTestPayloadValue conf test payloadTxs countTruncated payloadBytesTruncated trust
       (txs, bytesTruncated) = streamableBoundTxsByJsonBytes conf mkPayload shaped
   in mkPayload txs bytesTruncated
 
-streamableReproducerTrust :: TestState -> Value
-streamableReproducerTrust state = object
-  [ "source" .= ("current-test-ref" :: Text)
-  , "status" .= streamableReproducerTrustStatus state
-  , "verified" .= streamableReproducerVerified state
+streamableEventTestPayloadValue :: MCPConf -> EchidnaTest -> [Tx] -> Bool -> Bool -> Value -> Value
+streamableEventTestPayloadValue conf test payloadTxs countTruncated payloadBytesTruncated trust =
+  let originalLength = length test.reproducer
+      shaped = streamableShapeTxsLimit conf conf.reproducerEventsLimit test.reproducer
+      truncated = countTruncated || payloadBytesTruncated || length payloadTxs < length shaped
+      redacted = not conf.includeCallData && not (null payloadTxs)
+  in object
+    [ "state" .= test.state
+    , "type" .= test.testType
+    , "value" .= test.value
+    , "reproducer" .= payloadTxs
+    , "result" .= test.result
+    , "reproducerLength" .= object
+        [ "original" .= originalLength
+        , "returned" .= length payloadTxs
+        ]
+    , "truncated" .= truncated
+    , "redacted" .= redacted
+    , "callDataPolicy" .= (if conf.includeCallData then ("included" :: Text) else "redacted")
+    , "maxJsonBytes" .= conf.maxReproducerJsonBytes
+    , "reproducerTrust" .= trust
+    ]
+
+data StreamableReproducerVerification = StreamableReproducerVerification
+  { verified :: Bool
+  , status :: Text
+  , reason :: Text
+  }
+
+streamableReproducerTrust :: TestState -> StreamableReproducerVerification -> Value
+streamableReproducerTrust = streamableReproducerTrustFrom "current-test-ref"
+
+streamableEventReproducerTrust :: TestState -> StreamableReproducerVerification -> Value
+streamableEventReproducerTrust = streamableReproducerTrustFrom "event-payload"
+
+streamableReproducerTrustFrom :: Text -> TestState -> StreamableReproducerVerification -> Value
+streamableReproducerTrustFrom source state verification = object
+  [ "source" .= source
+  , "status" .= verification.status
+  , "verified" .= verification.verified
+  , "stability" .= streamableReproducerStability state
   , "mode" .= ("concrete" :: Text)
   , "verifiedInvariant" .= ("same-test-same-sequence-falsified" :: Text)
-  , "eventPayloadAuthoritative" .= False
+  , "reason" .= verification.reason
   ]
 
-streamableEventReproducerTrust :: Value
-streamableEventReproducerTrust = object
-  [ "source" .= ("event-payload" :: Text)
-  , "status" .= ("notification" :: Text)
-  , "verified" .= False
-  , "mode" .= ("concrete" :: Text)
-  , "sourceOfTruth" .= ("get_reproducers" :: Text)
-  , "eventPayloadAuthoritative" .= False
-  ]
+streamableUnverifiedReproducerTrust :: TestState -> Text -> Value
+streamableUnverifiedReproducerTrust state reason =
+  streamableReproducerTrust state (StreamableReproducerVerification False "unverified" reason)
 
-streamableReproducerTrustStatus :: TestState -> Text
-streamableReproducerTrustStatus = \case
-  Large _ -> "candidate"
-  Solved -> "verified"
+streamableUnverifiedEventReproducerTrust :: TestState -> Text -> Value
+streamableUnverifiedEventReproducerTrust state reason =
+  streamableEventReproducerTrust state (StreamableReproducerVerification False "unverified" reason)
+
+streamableReproducerStability :: TestState -> Text
+streamableReproducerStability = \case
+  Large _ -> "shrinking"
+  Solved -> "final"
   Failed _ -> "failed"
-  _ -> "unavailable"
+  _ -> "unknown"
 
-streamableReproducerVerified :: TestState -> Bool
-streamableReproducerVerified = \case
-  Solved -> True
+streamableVerifyReproducer :: Env -> VM Concrete -> EchidnaTest -> [Tx] -> IO StreamableReproducerVerification
+streamableVerifyReproducer env initialVm test txs = do
+  replayed <- try (flip runReaderT env $ do
+    finalVm <- foldM (\vm tx -> snd <$> execTx vm tx) initialVm txs
+    (value, checkedVm) <- checkETest test finalVm
+    pure (value, getResultFromVM checkedVm)) :: IO (Either SomeException (TestValue, TxResult))
+  case replayed of
+    Left _ ->
+      pure $ StreamableReproducerVerification False "unverified" "replay-threw"
+    Right (value, result)
+      | streamableReplayStillFails test value && result == test.result ->
+          pure $ StreamableReproducerVerification True "verified" "concrete-replay-confirmed"
+      | streamableReplayStillFails test value ->
+          pure $ StreamableReproducerVerification False "unverified" "result-mismatch"
+      | otherwise ->
+          pure $ StreamableReproducerVerification False "unverified" "replay-did-not-falsify"
+
+streamableReplayStillFails :: EchidnaTest -> TestValue -> Bool
+streamableReplayStillFails test = \case
+  BoolValue False -> True
+  IntValue value ->
+    case test.value of
+      IntValue previous -> value >= previous
+      _ -> False
   _ -> False
 
 streamableArtifactHasReproducer :: Value -> Bool
@@ -1352,6 +1441,26 @@ recordStreamableEvent conf st ts ev = do
           Worker.ServerLog msg ->
             (Nothing, Nothing, "ServerLog", toJSON msg)
   payload <- evaluate (force payload0)
+  insertStreamableEvent st ts wid wtype etype payload
+
+recordVerifiedStreamableEvent :: Env -> VM Concrete -> MCPConf -> StreamableMCPState -> LocalTime -> Worker.CampaignEvent -> IO ()
+recordVerifiedStreamableEvent env initialVm conf st ts ev = do
+  (wid, wtype, etype, payload0) <-
+    case ev of
+      Worker.WorkerEvent wid' wtype' e -> do
+        payload <- streamableVerifiedWorkerPayload env initialVm conf e
+        pure (Just wid', Just (streamableWorkerTypeText wtype'), streamableWorkerEventType e, payload)
+      Worker.Failure msg ->
+        pure (Nothing, Nothing, "Failure", toJSON msg)
+      Worker.ReproducerSaved f ->
+        pure (Nothing, Nothing, "ReproducerSaved", toJSON f)
+      Worker.ServerLog msg ->
+        pure (Nothing, Nothing, "ServerLog", toJSON msg)
+  payload <- evaluate (force payload0)
+  insertStreamableEvent st ts wid wtype etype payload
+
+insertStreamableEvent :: StreamableMCPState -> LocalTime -> Maybe Int -> Maybe Text -> Text -> Value -> IO ()
+insertStreamableEvent st ts wid wtype etype payload =
   atomicModifyIORef' st.streamableEventsRef $ \buf ->
     let eventId = buf.streamableNextEventId
         event = StreamableMCPEvent eventId (streamableFormatTimestamp ts) wid wtype etype payload
@@ -1401,6 +1510,12 @@ streamableWorkerPayload conf = \case
     , "tx" .= tx
     ]
   Worker.WorkerStopped reason -> object ["reason" .= show reason]
+
+streamableVerifiedWorkerPayload :: Env -> VM Concrete -> MCPConf -> Worker.WorkerEvent -> IO Value
+streamableVerifiedWorkerPayload env initialVm conf = \case
+  Worker.TestFalsified test -> streamableVerifiedEventTestPayload env initialVm conf test
+  Worker.TestOptimized test -> streamableVerifiedEventTestPayload env initialVm conf test
+  event -> pure $ streamableWorkerPayload conf event
 
 streamableReadQueryIntMaybe :: Text -> Map Text Text -> Maybe Int
 streamableReadQueryIntMaybe key query =

@@ -123,7 +123,7 @@ ui vm dict initialCorpus cliSelectedContract = do
 
       when conf.mcpConf.enabled $ do
         liftIO $ pushCampaignEvent env (ServerLog ("MCP Server running at http://" ++ unpack conf.mcpConf.host ++ ":" ++ show conf.mcpConf.port ++ "/mcp"))
-        void $ liftIO $ forkIO $ runStreamableMCPServer env (map snd workers)
+        void $ liftIO $ forkIO $ runStreamableMCPServer env vm (map snd workers)
 
       ticker <- liftIO . forkIO . forever $ do
         threadDelay 200_000 -- 200 ms
@@ -221,7 +221,7 @@ ui vm dict initialCorpus cliSelectedContract = do
 
       when conf.mcpConf.enabled $ do
         liftIO $ pushCampaignEvent env (ServerLog ("MCP Server running at http://" ++ unpack conf.mcpConf.host ++ ":" ++ show conf.mcpConf.port ++ "/mcp"))
-        void $ liftIO $ forkIO $ runStreamableMCPServer env (map snd workers)
+        void $ liftIO $ forkIO $ runStreamableMCPServer env vm (map snd workers)
 
       ticker <- liftIO . forkIO . forever $ do
         threadDelay 3_000_000 -- 3 seconds

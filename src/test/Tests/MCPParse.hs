@@ -305,22 +305,24 @@ streamableReliabilityTests = testGroup "streamable MCP reliability"
       let artifact = streamableTestArtifact defaultMCPConf 0 (mkStreamableTest 1)
       objectBool ["reproducer", "redacted"] artifact @?= Just True
       objectText ["reproducer", "callDataPolicy"] artifact @?= Just "redacted"
-  , testCase "shrinking reproducer snapshots are trust candidates" $ do
+  , testCase "pure reproducer snapshots are unverified until replayed" $ do
       let artifact = streamableTestArtifact defaultMCPConf 0 (mkStreamableTestWithState (Large 0) 1)
       objectText ["reproducer", "trust", "source"] artifact @?= Just "current-test-ref"
-      objectText ["reproducer", "trust", "status"] artifact @?= Just "candidate"
+      objectText ["reproducer", "trust", "status"] artifact @?= Just "unverified"
       objectBool ["reproducer", "trust", "verified"] artifact @?= Just False
-  , testCase "solved reproducer snapshots are marked verified" $ do
+      objectText ["reproducer", "trust", "stability"] artifact @?= Just "shrinking"
+  , testCase "solved pure snapshots are final but still unverified until replayed" $ do
       let artifact = streamableTestArtifact defaultMCPConf 0 (mkStreamableTestWithState Solved 1)
-      objectText ["reproducer", "trust", "status"] artifact @?= Just "verified"
-      objectBool ["reproducer", "trust", "verified"] artifact @?= Just True
+      objectText ["reproducer", "trust", "status"] artifact @?= Just "unverified"
+      objectBool ["reproducer", "trust", "verified"] artifact @?= Just False
+      objectText ["reproducer", "trust", "stability"] artifact @?= Just "final"
       objectText ["reproducer", "trust", "verifiedInvariant"] artifact @?= Just "same-test-same-sequence-falsified"
-  , testCase "event reproducers are notification payloads only" $ do
+  , testCase "pure event reproducers are unverified until replayed" $ do
       let payload = streamableWorkerPayload defaultMCPConf (Worker.TestFalsified (mkStreamableTest 1))
       objectText ["reproducerTrust", "source"] payload @?= Just "event-payload"
-      objectText ["reproducerTrust", "status"] payload @?= Just "notification"
-      objectText ["reproducerTrust", "sourceOfTruth"] payload @?= Just "get_reproducers"
-      objectBool ["reproducerTrust", "eventPayloadAuthoritative"] payload @?= Just False
+      objectText ["reproducerTrust", "status"] payload @?= Just "unverified"
+      objectBool ["reproducerTrust", "verified"] payload @?= Just False
+      objectText ["reproducerTrust", "sourceOfTruth"] payload @?= Nothing
   , testCase "event payloads are forced before insertion" $ do
       st <- mkStreamableState 10
       let ts = read "2026-06-06 00:00:00" :: LocalTime
@@ -437,7 +439,7 @@ mkStreamableState maxEvents = do
   coverageRef <- newIORef (Object mempty)
   refreshingRef <- newIORef False
   let started = read "2026-06-06 00:00:00 UTC" :: UTCTime
-  pure $ StreamableMCPState eventsRef started maxEvents 65536 coverageRef refreshingRef
+  pure $ StreamableMCPState eventsRef started maxEvents 65536 coverageRef refreshingRef Nothing
 
 nextBodyChunk :: IORef [BS.ByteString] -> IO BS.ByteString
 nextBodyChunk ref =
