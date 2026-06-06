@@ -145,7 +145,11 @@ instance FromJSON EConfigWithUsage where
             <*> mcpObj .:? "maxEvents" .!= defaultMCPConf.maxEvents
             <*> mcpObj .:? "maxReverts" .!= defaultMCPConf.maxReverts
             <*> mcpObj .:? "maxTxs" .!= defaultMCPConf.maxTxs
-            <*> ((<|>) <$> mcpObj .:? "reproducerArtifactsLimit" <*> mcpObj .:? "maxReproducerArtifacts") .!= defaultMCPConf.maxReproducerArtifacts
+            <*> ( ((<|>) <$> mcpObj .:? "maxReproducers"
+                         <*> ((<|>) <$> mcpObj .:? "reproducerArtifactsLimit"
+                                   <*> mcpObj .:? "maxReproducerArtifacts"))
+                  .!= defaultMCPConf.maxReproducerArtifacts
+                )
             <*> mcpObj .:? "maxReproducerTxs" .!= defaultMCPConf.maxReproducerTxs
             <*> mcpObj .:? "reproducerEventsLimit" .!= defaultMCPConf.reproducerEventsLimit
             <*> mcpObj .:? "reproducerResultTTLMinutes" .!= defaultMCPConf.reproducerResultTTLMinutes

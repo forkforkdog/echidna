@@ -172,6 +172,7 @@ data Options = Options
   , cliMcpMaxEvents    :: Maybe Int
   , cliMcpMaxReverts   :: Maybe Int
   , cliMcpMaxTxs       :: Maybe Int
+  , cliMcpMaxReproducers :: Maybe Int
   , cliMcpMaxReproducerArtifacts :: Maybe Int
   , cliMcpReproducerArtifactsLimit :: Maybe Int
   , cliMcpMaxReproducerTxs      :: Maybe Int
@@ -270,6 +271,9 @@ options = Options . NE.fromList
   <*> optional (option auto $ long "mcp-max-txs"
     <> metavar "N"
     <> help "MCP ring buffer size for transactions.")
+  <*> optional (option auto $ long "mcp-max-reproducers"
+    <> metavar "N"
+    <> help "Alias for mcp-max-reproducer-artifacts.")
   <*> optional (option auto $ long "mcp-max-reproducer-artifacts"
     <> metavar "N"
     <> help "MCP maximum reproducer artifacts to retain.")
@@ -411,7 +415,7 @@ overrideConfig config Options{..} = do
       , maxTxs = fromMaybe mcpConf.maxTxs cliMcpMaxTxs
       , maxReproducerArtifacts = fromMaybe
           (fromMaybe mcpConf.maxReproducerArtifacts cliMcpMaxReproducerArtifacts)
-          (cliMcpReproducerArtifactsLimit <|> cliMcpMaxReproducerArtifacts)
+          (cliMcpMaxReproducers <|> cliMcpReproducerArtifactsLimit <|> cliMcpMaxReproducerArtifacts)
       , maxReproducerTxs = fromMaybe mcpConf.maxReproducerTxs cliMcpMaxReproducerTxs
       , reproducerEventsLimit = fromMaybe mcpConf.reproducerEventsLimit cliMcpReproducerEventsLimit
       , reproducerResultTTLMinutes = fromMaybe mcpConf.reproducerResultTTLMinutes cliMcpReproducerResultTTLMinutes

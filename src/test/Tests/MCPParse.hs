@@ -7,6 +7,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.Map qualified as Map
 import Data.Maybe (isNothing, mapMaybe)
 import Data.Text qualified as T
 import Data.Time (LocalTime, UTCTime)
@@ -29,6 +30,7 @@ import Echidna.MCP
   , streamableWorkerPayload
   , streamableResourcesList
   , streamableDecodeUriComponent
+  , streamableEvents
   , streamableStatusSnapshot
   , StreamableEventBuffer(..)
   , StreamableMCPEvent(..)
@@ -250,6 +252,18 @@ streamableReliabilityTests = testGroup "streamable MCP reliability"
       StreamableEventBuffer nextId items <- readIORef st.streamableEventsRef
       nextId @?= 3
       map fst items @?= [1, 2]
+  , testCase "get_events without since returns latest retained events in chronological order" $ do
+      st <- mkStreamableState 10
+      let ts = read "2026-06-06 00:00:00" :: LocalTime
+      mapM_ (\i -> recordStreamableEvent defaultMCPConf st ts (Worker.WorkerEvent i Worker.FuzzWorker (Worker.Log ("event-" <> show i)))) [0..4]
+      payload <- streamableEvents st (Map.fromList [("limit", "2")])
+      eventIds payload @?= [3, 4]
+  , testCase "get_events with since returns first events after cursor" $ do
+      st <- mkStreamableState 10
+      let ts = read "2026-06-06 00:00:00" :: LocalTime
+      mapM_ (\i -> recordStreamableEvent defaultMCPConf st ts (Worker.WorkerEvent i Worker.FuzzWorker (Worker.Log ("event-" <> show i)))) [0..4]
+      payload <- streamableEvents st (Map.fromList [("since", "1"), ("limit", "2")])
+      eventIds payload @?= [2, 3]
   , testCase "event payloads are forced before insertion" $ do
       st <- mkStreamableState 10
       let ts = read "2026-06-06 00:00:00" :: LocalTime
@@ -324,6 +338,13 @@ objectInt [] (Number n) =
 objectInt (key:keys) (Object o) =
   KM.lookup (K.fromText key) o >>= objectInt keys
 objectInt _ _ = Nothing
+
+eventIds :: Value -> [Int]
+eventIds (Object o) =
+  case KM.lookup (K.fromText $ T.pack "events") o of
+    Just (Array xs) -> mapMaybe (objectInt ["id"]) (Vector.toList xs)
+    _ -> []
+eventIds _ = []
 
 mkStreamableState :: Int -> IO StreamableMCPState
 mkStreamableState maxEvents = do

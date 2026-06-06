@@ -6,7 +6,7 @@ module Echidna.MCP where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.DeepSeq (force)
-import Control.Exception (SomeException, evaluate, finally, try)
+import Control.Exception (SomeException, displayException, evaluate, finally, try)
 import Control.Monad (forever, unless, void, when)
 import Control.Concurrent.STM
 import Control.Concurrent.Chan (dupChan, readChan)
@@ -33,6 +33,7 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Text.Read (readMaybe)
 import System.Directory (getCurrentDirectory)
+import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 import Data.Char (digitToInt, isHexDigit, isSpace, toLower)
 import Data.String (fromString)
@@ -674,8 +675,14 @@ runStreamableMCPServer env workerRefs = do
   ch <- dupChan env.eventQueue
   _ <- forkIO $ forever $ do
     (ts, ev) <- readChan ch
-    recordStreamableEvent conf st ts ev
-    streamableMaybeRefreshCoverage env st ev
+    result <- try (do
+      recordStreamableEvent conf st ts ev
+      streamableMaybeRefreshCoverage env st ev
+      ) :: IO (Either SomeException ())
+    case result of
+      Right () -> pure ()
+      Left err ->
+        hPutStrLn stderr ("echidna MCP event ingestion error: " <> displayException err)
   let settings = setPort conf.port . setHost (fromString $ T.unpack conf.host) $ defaultSettings
   runSettings settings (streamableMCPApp env workerRefs st)
 
@@ -896,10 +903,20 @@ streamableStatusSnapshot startedAt now workers failedTests totalTests points cod
 streamableEvents :: StreamableMCPState -> Map Text Text -> IO Value
 streamableEvents st query = do
   StreamableEventBuffer _ items <- readIORef st.streamableEventsRef
-  let since = streamableReadQueryInt "since" (-1) query
-      limit = min st.streamableMaxEvents . max 0 $ streamableReadQueryInt "limit" 200 query
-      selected = take limit [ev | (i, ev) <- items, i > since]
+  let limit = min st.streamableMaxEvents . max 0 $ streamableReadQueryInt "limit" 200 query
+      selected =
+        case Map.lookup "since" query of
+          Just _ ->
+            let since = streamableReadQueryInt "since" (-1) query
+            in take limit [ev | (i, ev) <- items, i > since]
+          Nothing ->
+            map snd $ streamableTakeLast limit items
   pure $ object ["events" .= selected]
+
+streamableTakeLast :: Int -> [a] -> [a]
+streamableTakeLast limit xs
+  | limit <= 0 = []
+  | otherwise = drop (length xs - limit) xs
 
 streamableReproducers :: Env -> Map Text Text -> IO Value
 streamableReproducers env query = do
