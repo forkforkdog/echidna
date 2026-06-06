@@ -1181,6 +1181,7 @@ streamableTestArtifact conf idx test =
               , "callDataPolicy" .= (if conf.includeCallData then ("included" :: Text) else "redacted")
               , "requiresTransactions" .= not (null artifactTxs)
               , "maxJsonBytes" .= conf.maxReproducerJsonBytes
+              , "trust" .= streamableReproducerTrust test.state
               ]
           , "shrink" .= object
               [ "status" .= streamableShrinkStatus test.state
@@ -1227,9 +1228,42 @@ streamableEventTestPayload conf test =
           , "redacted" .= redacted
           , "callDataPolicy" .= (if conf.includeCallData then ("included" :: Text) else "redacted")
           , "maxJsonBytes" .= conf.maxReproducerJsonBytes
+          , "reproducerTrust" .= streamableEventReproducerTrust
           ]
       (txs, bytesTruncated) = streamableBoundTxsByJsonBytes conf mkPayload shaped
   in mkPayload txs bytesTruncated
+
+streamableReproducerTrust :: TestState -> Value
+streamableReproducerTrust state = object
+  [ "source" .= ("current-test-ref" :: Text)
+  , "status" .= streamableReproducerTrustStatus state
+  , "verified" .= streamableReproducerVerified state
+  , "mode" .= ("concrete" :: Text)
+  , "verifiedInvariant" .= ("same-test-same-sequence-falsified" :: Text)
+  , "eventPayloadAuthoritative" .= False
+  ]
+
+streamableEventReproducerTrust :: Value
+streamableEventReproducerTrust = object
+  [ "source" .= ("event-payload" :: Text)
+  , "status" .= ("notification" :: Text)
+  , "verified" .= False
+  , "mode" .= ("concrete" :: Text)
+  , "sourceOfTruth" .= ("get_reproducers" :: Text)
+  , "eventPayloadAuthoritative" .= False
+  ]
+
+streamableReproducerTrustStatus :: TestState -> Text
+streamableReproducerTrustStatus = \case
+  Large _ -> "candidate"
+  Solved -> "verified"
+  Failed _ -> "failed"
+  _ -> "unavailable"
+
+streamableReproducerVerified :: TestState -> Bool
+streamableReproducerVerified = \case
+  Solved -> True
+  _ -> False
 
 streamableArtifactHasReproducer :: Value -> Bool
 streamableArtifactHasReproducer = \case
