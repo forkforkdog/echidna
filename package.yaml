@@ -68,7 +68,6 @@ library:
     - random
     - rosezipper
     - semver
-    - scientific
     - signal
     - split
     - stm

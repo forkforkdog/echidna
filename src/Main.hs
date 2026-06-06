@@ -29,7 +29,7 @@ import Options.Applicative
 import Paths_echidna (version)
 import System.Console.ANSI (hNowSupportsANSI)
 import System.Directory (createDirectoryIfMissing)
-import System.Exit (exitWith, exitSuccess, ExitCode(..), exitFailure)
+import System.Exit (die, exitWith, exitSuccess, ExitCode(..), exitFailure)
 import System.FilePath ((</>), (<.>))
 import System.IO (hPutStrLn, stderr)
 import System.IO.CodePage (withCP65001)
@@ -365,11 +365,12 @@ overrideConfig config Options{..} = do
   envRpcUrl <- Onchain.rpcUrlEnv
   envRpcBlock <- Onchain.rpcBlockEnv
   envEtherscanApiKey <- Onchain.etherscanApiKey
+  mcpConf <- either die pure . validateMCPConf $ overrideMcpConf config.mcpConf
   pure $
     config { solConf = overrideSolConf config.solConf
            , campaignConf = overrideCampaignConf config.campaignConf
            , uiConf = overrideUiConf config.uiConf
-           , mcpConf = overrideMcpConf config.mcpConf
+           , mcpConf = mcpConf
            , rpcUrl = cliRpcUrl <|> envRpcUrl <|> config.rpcUrl
            , rpcBlock = cliRpcBlock <|> envRpcBlock <|> config.rpcBlock
            , etherscanApiKey = envEtherscanApiKey <|> config.etherscanApiKey

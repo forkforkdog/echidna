@@ -20,7 +20,6 @@ import qualified Data.ByteString.Lazy.Char8 as BL8
 import Data.IORef (readIORef, modifyIORef', newIORef, IORef, atomicModifyIORef', writeIORef)
 import Data.Int (Int64)
 import Data.List (find, isPrefixOf, isSuffixOf, sort)
-import Data.Scientific (floatingOrInteger)
 import qualified Data.Maybe
 import qualified Data.Set as Set
 import qualified Data.Vector as Vector
@@ -661,7 +660,10 @@ data StreamableRpcRequest = StreamableRpcRequest
   }
 
 instance FromJSON StreamableRpcRequest where
-  parseJSON = withObject "StreamableRpcRequest" $ \o ->
+  parseJSON = withObject "StreamableRpcRequest" $ \o -> do
+    version <- o .: "jsonrpc"
+    when (version /= ("2.0" :: Text)) $
+      fail "jsonrpc must be \"2.0\""
     StreamableRpcRequest <$> o .:? "id" <*> o .: "method" <*> o .:? "params"
 
 runStreamableMCPServer :: Env -> [IORef WorkerState] -> IO ()
@@ -735,7 +737,6 @@ streamableJson status val = responseLBS status jsonHeaders (encode val)
 jsonHeaders :: ResponseHeaders
 jsonHeaders =
   [ (hContentType, "application/json")
-  , ("Mcp-Session-Id", "echidna")
   ]
 
 handleStreamableRpc :: Env -> [IORef WorkerState] -> StreamableMCPState -> StreamableRpcRequest -> IO (Maybe Value)
@@ -752,11 +753,9 @@ handleStreamableRpc env workerRefs st req =
     "resources/list" ->
       pure . Just $ streamableMcpResult (fromMaybeNull req.streamableRpcId) streamableResourcesList
     "tools/call" -> do
-      res <- streamableToolsCall env workerRefs st req.streamableRpcParams
-      pure . Just $ either id (streamableMcpResult (fromMaybeNull req.streamableRpcId)) res
+      Just <$> streamableToolsCall (fromMaybeNull req.streamableRpcId) env workerRefs st req.streamableRpcParams
     "resources/read" -> do
-      res <- streamableResourcesRead env workerRefs st req.streamableRpcParams
-      pure . Just $ either id (streamableMcpResult (fromMaybeNull req.streamableRpcId)) res
+      Just <$> streamableResourcesRead (fromMaybeNull req.streamableRpcId) env workerRefs st req.streamableRpcParams
     _ ->
       pure . Just $ streamableMcpError (fromMaybeNull req.streamableRpcId) (-32601) "Method not found"
 
@@ -777,19 +776,65 @@ streamableInitializeResult = object
 streamableToolsList :: Value
 streamableToolsList = object
   [ "tools" .=
-      [ streamableTool "get_status" "Get run status"
-      , streamableTool "get_events" "Get recent campaign events"
-      , streamableTool "get_reproducers" "List reproducer snapshots"
-      , streamableTool "get_reproducer" "Get a reproducer snapshot"
-      , streamableTool "get_coverage_hits" "Get coverage line hits"
+      [ streamableTool "get_status" "Get run status" streamableEmptyArgsSchema
+      , streamableTool "get_events" "Get recent campaign events" streamableEventsSchema
+      , streamableTool "get_reproducers" "List reproducer snapshots" streamableReproducersSchema
+      , streamableTool "get_reproducer" "Get a reproducer snapshot" streamableReproducerSchema
+      , streamableTool "get_coverage_hits" "Get coverage line hits" streamableEmptyArgsSchema
       ]
   ]
   where
-    streamableTool name desc = object
+    streamableTool name desc schema = object
       [ "name" .= (name :: Text)
       , "description" .= (desc :: Text)
-      , "inputSchema" .= object []
+      , "inputSchema" .= schema
       ]
+
+streamableEmptyArgsSchema :: Value
+streamableEmptyArgsSchema = object
+  [ "type" .= ("object" :: Text)
+  , "additionalProperties" .= False
+  ]
+
+streamableIntSchema :: Text -> Int -> Value
+streamableIntSchema desc minValue = object
+  [ "type" .= ("integer" :: Text)
+  , "minimum" .= minValue
+  , "description" .= desc
+  ]
+
+streamableEventsSchema :: Value
+streamableEventsSchema = object
+  [ "type" .= ("object" :: Text)
+  , "properties" .= object
+      [ "since" .= streamableIntSchema "Return events with id greater than this cursor." 0
+      , "limit" .= streamableIntSchema "Maximum events to return." 1
+      ]
+  , "additionalProperties" .= False
+  ]
+
+streamableReproducersSchema :: Value
+streamableReproducersSchema = object
+  [ "type" .= ("object" :: Text)
+  , "properties" .= object
+      [ "offset" .= streamableIntSchema "Number of reproducer artifacts to skip." 0
+      , "limit" .= streamableIntSchema "Maximum reproducer artifacts to return." 1
+      ]
+  , "additionalProperties" .= False
+  ]
+
+streamableReproducerSchema :: Value
+streamableReproducerSchema = object
+  [ "type" .= ("object" :: Text)
+  , "properties" .= object
+      [ "testKey" .= object
+          [ "type" .= ("string" :: Text)
+          , "description" .= ("Key from get_reproducers." :: Text)
+          ]
+      ]
+  , "required" .= ["testKey" :: Text]
+  , "additionalProperties" .= False
+  ]
 
 streamableResourcesList :: Value
 streamableResourcesList = object
@@ -808,61 +853,101 @@ streamableResourcesList = object
       , "mimeType" .= ("application/json" :: Text)
       ]
 
-streamableToolsCall :: Env -> [IORef WorkerState] -> StreamableMCPState -> Maybe Value -> IO (Either Value Value)
-streamableToolsCall env workerRefs st params =
+data StreamableToolResult
+  = StreamableToolOk Value
+  | StreamableToolError Text
+  | StreamableToolRpcError Int Text
+
+streamableToolsCall :: Value -> Env -> [IORef WorkerState] -> StreamableMCPState -> Maybe Value -> IO Value
+streamableToolsCall rid env workerRefs st params =
   case params of
     Just (Object o) ->
       case KM.lookup (K.fromText "name") o of
         Just (String name) -> do
           let args = KM.lookup (K.fromText "arguments") o
-          value <- runStreamableTool env workerRefs st name args
-          pure . Right . object $
-            [ "content" .=
-                [ object
-                    [ "type" .= ("text" :: Text)
-                    , "text" .= decodeUtf8 (BL8.toStrict $ encode value)
-                    ]
-                ]
-            ]
-        _ -> pure . Left $ streamableMcpError Null (-32602) "Missing tool name"
-    _ -> pure . Left $ streamableMcpError Null (-32602) "Missing params"
+          result <- runStreamableTool env workerRefs st name args
+          pure $ case result of
+            StreamableToolOk value -> streamableMcpResult rid (streamableToolContent value)
+            StreamableToolError msg -> streamableMcpResult rid (streamableToolError msg)
+            StreamableToolRpcError code msg -> streamableMcpError rid code msg
+        _ -> pure $ streamableMcpError rid (-32602) "Missing tool name"
+    _ -> pure $ streamableMcpError rid (-32602) "Missing params"
 
-streamableResourcesRead :: Env -> [IORef WorkerState] -> StreamableMCPState -> Maybe Value -> IO (Either Value Value)
-streamableResourcesRead env workerRefs st params =
+streamableToolContent :: Value -> Value
+streamableToolContent value = object
+  [ "content" .=
+      [ object
+          [ "type" .= ("text" :: Text)
+          , "text" .= decodeUtf8 (BL8.toStrict $ encode value)
+          ]
+      ]
+  ]
+
+streamableToolError :: Text -> Value
+streamableToolError msg = object
+  [ "content" .=
+      [ object
+          [ "type" .= ("text" :: Text)
+          , "text" .= msg
+          ]
+      ]
+  , "isError" .= True
+  ]
+
+streamableResourcesRead :: Value -> Env -> [IORef WorkerState] -> StreamableMCPState -> Maybe Value -> IO Value
+streamableResourcesRead rid env workerRefs st params =
   case params of
     Just (Object o) ->
       case KM.lookup (K.fromText "uri") o of
         Just (String uri) -> do
-          value <- readStreamableResource env workerRefs st uri
-          let content = object
-                [ "uri" .= uri
-                , "mimeType" .= ("application/json" :: Text)
-                , "text" .= decodeUtf8 (BL8.toStrict $ encode value)
-                ]
-          pure . Right $ object ["contents" .= [content]]
-        _ -> pure . Left $ streamableMcpError Null (-32602) "Missing uri"
-    _ -> pure . Left $ streamableMcpError Null (-32602) "Missing params"
+          result <- readStreamableResource env workerRefs st uri
+          pure $ case result of
+            Left msg -> streamableMcpError rid (-32602) msg
+            Right value ->
+              let content = object
+                    [ "uri" .= uri
+                    , "mimeType" .= ("application/json" :: Text)
+                    , "text" .= decodeUtf8 (BL8.toStrict $ encode value)
+                    ]
+              in streamableMcpResult rid $ object ["contents" .= [content]]
+        _ -> pure $ streamableMcpError rid (-32602) "Missing uri"
+    _ -> pure $ streamableMcpError rid (-32602) "Missing params"
 
-runStreamableTool :: Env -> [IORef WorkerState] -> StreamableMCPState -> Text -> Maybe Value -> IO Value
+runStreamableTool :: Env -> [IORef WorkerState] -> StreamableMCPState -> Text -> Maybe Value -> IO StreamableToolResult
 runStreamableTool env workerRefs st name args =
   case name of
-    "get_status" -> streamableStatus env workerRefs st
-    "get_events" -> streamableEvents st (streamableArgsToMap args)
-    "get_reproducers" -> streamableReproducers env (streamableArgsToMap args)
-    "get_reproducer" -> streamableReproducer env (streamableArgsToMap args)
-    "get_coverage_hits" -> streamableCoverageLines env st
-    _ -> pure $ object ["error" .= ("unknown tool" :: Text)]
+    "get_status" -> StreamableToolOk <$> streamableStatus env workerRefs st
+    "get_events" ->
+      case parseStreamableArgs args >>= validateStreamableEventsArgs st.streamableMaxEvents of
+        Left msg -> pure $ StreamableToolError msg
+        Right parsed -> StreamableToolOk <$> streamableEvents st parsed
+    "get_reproducers" ->
+      case parseStreamableArgs args >>= validateStreamableReproducersArgs env.cfg.mcpConf of
+        Left msg -> pure $ StreamableToolError msg
+        Right parsed -> StreamableToolOk <$> streamableReproducers env parsed
+    "get_reproducer" ->
+      case parseStreamableArgs args of
+        Left msg -> pure $ StreamableToolError msg
+        Right parsed -> either StreamableToolError StreamableToolOk <$> streamableReproducer env parsed
+    "get_coverage_hits" -> StreamableToolOk <$> streamableCoverageLines env st
+    _ -> pure $ StreamableToolRpcError (-32602) ("Unknown tool: " <> name)
 
-readStreamableResource :: Env -> [IORef WorkerState] -> StreamableMCPState -> Text -> IO Value
+readStreamableResource :: Env -> [IORef WorkerState] -> StreamableMCPState -> Text -> IO (Either Text Value)
 readStreamableResource env workerRefs st uri =
   case streamableSplitUri uri of
-    ("echidna://run/status", _) -> streamableStatus env workerRefs st
-    ("echidna://run/events", query) -> streamableEvents st query
-    ("echidna://run/reproducers", query) -> streamableReproducers env query
-    ("echidna://coverage/lines", _) -> streamableCoverageLines env st
+    ("echidna://run/status", _) -> Right <$> streamableStatus env workerRefs st
+    ("echidna://run/events", query) ->
+      case streamableEventsArgsFromQuery st.streamableMaxEvents query of
+        Left msg -> pure $ Left msg
+        Right parsed -> Right <$> streamableEvents st parsed
+    ("echidna://run/reproducers", query) ->
+      case streamableReproducersArgsFromQuery env.cfg.mcpConf query of
+        Left msg -> pure $ Left msg
+        Right parsed -> Right <$> streamableReproducers env parsed
+    ("echidna://coverage/lines", _) -> Right <$> streamableCoverageLines env st
     (path, _) | "echidna://run/reproducer/" `T.isPrefixOf` path ->
-      streamableReproducer env (Map.singleton "testKey" (streamableDecodeUriComponent $ T.drop (T.length "echidna://run/reproducer/") path))
-    _ -> pure $ object ["error" .= ("unknown resource" :: Text)]
+      streamableReproducer env (StreamableReproducerArgs . streamableDecodeUriComponent $ T.drop (T.length "echidna://run/reproducer/") path)
+    _ -> pure . Left $ "Unknown resource: " <> uri
 
 streamableStatus :: Env -> [IORef WorkerState] -> StreamableMCPState -> IO Value
 streamableStatus env workerRefs st = do
@@ -900,15 +985,76 @@ streamableStatusSnapshot startedAt now workers failedTests totalTests points cod
     , "elapsedMs" .= (max 0 elapsedMs :: Int)
     ]
 
-streamableEvents :: StreamableMCPState -> Map Text Text -> IO Value
-streamableEvents st query = do
+data StreamableEventsArgs = StreamableEventsArgs
+  { eventsSince :: Maybe Int
+  , eventsLimit :: Maybe Int
+  }
+
+instance FromJSON StreamableEventsArgs where
+  parseJSON = withObject "StreamableEventsArgs" $ \o ->
+    StreamableEventsArgs <$> o .:? "since" <*> o .:? "limit"
+
+data StreamableReproducersArgs = StreamableReproducersArgs
+  { reproducersOffset :: Maybe Int
+  , reproducersLimit :: Maybe Int
+  }
+
+instance FromJSON StreamableReproducersArgs where
+  parseJSON = withObject "StreamableReproducersArgs" $ \o ->
+    StreamableReproducersArgs <$> o .:? "offset" <*> o .:? "limit"
+
+newtype StreamableReproducerArgs = StreamableReproducerArgs
+  { reproducerTestKey :: Text
+  }
+
+instance FromJSON StreamableReproducerArgs where
+  parseJSON = withObject "StreamableReproducerArgs" $ \o ->
+    StreamableReproducerArgs <$> o .: "testKey"
+
+parseStreamableArgs :: FromJSON a => Maybe Value -> Either Text a
+parseStreamableArgs args =
+  case fromJSON (Data.Maybe.fromMaybe (Object mempty) args) of
+    Success parsed -> Right parsed
+    Error err -> Left $ T.pack err
+
+validateStreamableEventsArgs :: Int -> StreamableEventsArgs -> Either Text StreamableEventsArgs
+validateStreamableEventsArgs maxEvents args
+  | maybe False (< 0) args.eventsSince = Left "since must be >= 0"
+  | maybe False (<= 0) args.eventsLimit = Left "limit must be > 0"
+  | maybe False (> maxEvents) args.eventsLimit = Left "limit exceeds mcp.maxEvents"
+  | otherwise = Right args
+
+validateStreamableReproducersArgs :: MCPConf -> StreamableReproducersArgs -> Either Text StreamableReproducersArgs
+validateStreamableReproducersArgs conf args
+  | maybe False (< 0) args.reproducersOffset = Left "offset must be >= 0"
+  | maybe False (<= 0) args.reproducersLimit = Left "limit must be > 0"
+  | maybe False (> maxArtifacts) args.reproducersLimit = Left "limit exceeds mcp.maxReproducerArtifacts"
+  | otherwise = Right args
+  where
+    maxArtifacts = max 0 conf.maxReproducerArtifacts
+
+streamableEventsArgsFromQuery :: Int -> Map Text Text -> Either Text StreamableEventsArgs
+streamableEventsArgsFromQuery maxEvents query =
+  validateStreamableEventsArgs maxEvents $
+    StreamableEventsArgs
+      (streamableReadQueryIntMaybe "since" query)
+      (streamableReadQueryIntMaybe "limit" query)
+
+streamableReproducersArgsFromQuery :: MCPConf -> Map Text Text -> Either Text StreamableReproducersArgs
+streamableReproducersArgsFromQuery conf query =
+  validateStreamableReproducersArgs conf $
+    StreamableReproducersArgs
+      (streamableReadQueryIntMaybe "offset" query)
+      (streamableReadQueryIntMaybe "limit" query)
+
+streamableEvents :: StreamableMCPState -> StreamableEventsArgs -> IO Value
+streamableEvents st args = do
   StreamableEventBuffer _ items <- readIORef st.streamableEventsRef
-  let limit = min st.streamableMaxEvents . max 0 $ streamableReadQueryInt "limit" 200 query
+  let limit = min st.streamableMaxEvents . Data.Maybe.fromMaybe 200 $ args.eventsLimit
       selected =
-        case Map.lookup "since" query of
-          Just _ ->
-            let since = streamableReadQueryInt "since" (-1) query
-            in take limit [ev | (i, ev) <- items, i > since]
+        case args.eventsSince of
+          Just since ->
+            take limit [ev | (i, ev) <- items, i > since]
           Nothing ->
             map snd $ streamableTakeLast limit items
   pure $ object ["events" .= selected]
@@ -918,14 +1064,13 @@ streamableTakeLast limit xs
   | limit <= 0 = []
   | otherwise = drop (length xs - limit) xs
 
-streamableReproducers :: Env -> Map Text Text -> IO Value
-streamableReproducers env query = do
+streamableReproducers :: Env -> StreamableReproducersArgs -> IO Value
+streamableReproducers env args = do
   tests <- mapM readIORef env.testRefs
-  let offset = max 0 $ streamableReadQueryInt "offset" 0 query
+  let offset = Data.Maybe.fromMaybe 0 args.reproducersOffset
       maxArtifacts = max 0 env.cfg.mcpConf.maxReproducerArtifacts
-      requestedLimit = streamableReadQueryInt "limit" maxArtifacts query
-      limit = min maxArtifacts (max 0 requestedLimit)
-      artifacts = filter streamableArtifactHasReproducer (zipWith (streamableTestArtifact env.cfg.mcpConf) [0..] tests)
+      limit = min maxArtifacts $ Data.Maybe.fromMaybe maxArtifacts args.reproducersLimit
+      artifacts = filter streamableArtifactIsInteresting (zipWith (streamableTestArtifact env.cfg.mcpConf) [0..] tests)
       selected = take limit (drop offset artifacts)
   pure $ object
     [ "reproducers" .= selected
@@ -933,14 +1078,14 @@ streamableReproducers env query = do
     , "nextOffset" .= (offset + length selected)
     ]
 
-streamableReproducer :: Env -> Map Text Text -> IO Value
-streamableReproducer env query = do
+streamableReproducer :: Env -> StreamableReproducerArgs -> IO (Either Text Value)
+streamableReproducer env args = do
   tests <- mapM readIORef env.testRefs
   let artifacts = zipWith (streamableTestArtifact env.cfg.mcpConf) [0..] tests
-      matchKey artifact = Map.lookup "testKey" query == streamableObjectText "testKey" artifact
+      matchKey artifact = Just args.reproducerTestKey == streamableObjectText "testKey" artifact
   case find matchKey artifacts of
-    Just artifact -> pure $ object ["testKey" .= streamableObjectText "testKey" artifact, "artifact" .= artifact]
-    Nothing -> pure $ object ["error" .= ("reproducer not found" :: Text)]
+    Just artifact -> pure . Right $ object ["testKey" .= streamableObjectText "testKey" artifact, "artifact" .= artifact]
+    Nothing -> pure . Left $ "Reproducer not found: " <> args.reproducerTestKey
 
 streamableCoverageTimeoutUsec :: Int
 streamableCoverageTimeoutUsec = 30000000
@@ -1013,6 +1158,7 @@ streamableTestArtifact conf idx test =
       testId = streamableRenderTestId test
       mkArtifact artifactTxs artifactBytesTruncated =
         let truncated = countTruncated || artifactBytesTruncated || length artifactTxs < length shaped
+            redacted = not conf.includeCallData && not (null artifactTxs)
         in object
           [ "testKey" .= key
           , "testId" .= testId
@@ -1031,6 +1177,9 @@ streamableTestArtifact conf idx test =
               , "originalLength" .= originalLength
               , "returnedLength" .= length artifactTxs
               , "truncated" .= truncated
+              , "redacted" .= redacted
+              , "callDataPolicy" .= (if conf.includeCallData then ("included" :: Text) else "redacted")
+              , "requiresTransactions" .= not (null artifactTxs)
               , "maxJsonBytes" .= conf.maxReproducerJsonBytes
               ]
           , "shrink" .= object
@@ -1063,6 +1212,7 @@ streamableEventTestPayload conf test =
       countTruncated = length shaped < originalLength
       mkPayload payloadTxs payloadBytesTruncated =
         let truncated = countTruncated || payloadBytesTruncated || length payloadTxs < length shaped
+            redacted = not conf.includeCallData && not (null payloadTxs)
         in object
           [ "state" .= test.state
           , "type" .= test.testType
@@ -1074,6 +1224,8 @@ streamableEventTestPayload conf test =
               , "returned" .= length payloadTxs
               ]
           , "truncated" .= truncated
+          , "redacted" .= redacted
+          , "callDataPolicy" .= (if conf.includeCallData then ("included" :: Text) else "redacted")
           , "maxJsonBytes" .= conf.maxReproducerJsonBytes
           ]
       (txs, bytesTruncated) = streamableBoundTxsByJsonBytes conf mkPayload shaped
@@ -1089,6 +1241,14 @@ streamableArtifactHasReproducer = \case
           _ -> False
       _ -> False
   _ -> False
+
+streamableArtifactIsInteresting :: Value -> Bool
+streamableArtifactIsInteresting artifact =
+  case streamableObjectText "state" artifact of
+    Just "large" -> True
+    Just "solved" -> True
+    Just "failed" -> True
+    _ -> streamableArtifactHasReproducer artifact
 
 streamableShapeTxs :: MCPConf -> [Tx] -> [Tx]
 streamableShapeTxs conf = streamableShapeTxsLimit conf conf.maxReproducerTxs
@@ -1208,28 +1368,9 @@ streamableWorkerPayload conf = \case
     ]
   Worker.WorkerStopped reason -> object ["reason" .= show reason]
 
-streamableArgsToMap :: Maybe Value -> Map Text Text
-streamableArgsToMap = \case
-  Just (Object o) -> Map.fromList $ map toPair (KM.toList o)
-  _ -> mempty
-  where
-    toPair (k, v) = (K.toText k, streamableQueryValueText v)
-
-streamableQueryValueText :: Value -> Text
-streamableQueryValueText = \case
-  String t -> t
-  Number n -> case floatingOrInteger n of
-    Left (d :: Double) -> T.pack (show d)
-    Right (i :: Integer) -> T.pack (show i)
-  Bool b -> if b then "true" else "false"
-  Null -> "null"
-  _ -> ""
-
-streamableReadQueryInt :: Text -> Int -> Map Text Text -> Int
-streamableReadQueryInt key def query =
-  case Map.lookup key query of
-    Nothing -> def
-    Just value -> Data.Maybe.fromMaybe def (readMaybe $ T.unpack value)
+streamableReadQueryIntMaybe :: Text -> Map Text Text -> Maybe Int
+streamableReadQueryIntMaybe key query =
+  Map.lookup key query >>= readMaybe . T.unpack
 
 streamableSplitUri :: Text -> (Text, Map Text Text)
 streamableSplitUri uri =

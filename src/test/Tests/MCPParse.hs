@@ -1,13 +1,12 @@
 module Tests.MCPParse (mcpParseTests) where
 
 import Control.Exception (ErrorCall, try)
-import Data.Aeson (Result(..), Value(..), encode, fromJSON)
+import Data.Aeson (Result(..), Value(..), encode, fromJSON, object, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
-import Data.Map qualified as Map
 import Data.Maybe (isNothing, mapMaybe)
 import Data.Text qualified as T
 import Data.Time (LocalTime, UTCTime)
@@ -28,13 +27,20 @@ import Echidna.MCP
   , splitArgs
   , streamableTestArtifact
   , streamableWorkerPayload
+  , streamableArtifactIsInteresting
   , streamableResourcesList
   , streamableDecodeUriComponent
   , streamableEvents
   , streamableStatusSnapshot
+  , streamableToolsCall
+  , streamableToolsList
+  , streamableResourcesRead
+  , jsonHeaders
   , StreamableEventBuffer(..)
+  , StreamableEventsArgs(..)
   , StreamableMCPEvent(..)
   , StreamableMCPState(..)
+  , StreamableRpcRequest(..)
   , recordStreamableEvent
   , streamableStrictRequestBodyWithLimit
   )
@@ -233,7 +239,33 @@ streamableStatusTests = testGroup "streamable status"
 
 streamableReliabilityTests :: TestTree
 streamableReliabilityTests = testGroup "streamable MCP reliability"
-  [ testCase "request body reader accepts chunks within the configured limit" $ do
+  [ testCase "response headers do not advertise a fake session id" $
+      length jsonHeaders @?= 1
+  , testCase "tool schemas advertise accepted arguments" $ do
+      assertBool "get_events.limit schema missing" $
+        toolSchemaHasProperty "get_events" "limit" streamableToolsList
+      assertBool "get_reproducer.testKey schema missing" $
+        toolSchemaHasProperty "get_reproducer" "testKey" streamableToolsList
+  , testCase "JSON-RPC parser requires version 2.0" $
+      case fromJSON (object ["jsonrpc" .= ("1.0" :: T.Text), "method" .= ("ping" :: T.Text)]) :: Result StreamableRpcRequest of
+        Error _ -> pure ()
+        Success _ -> assertFailure "expected invalid jsonrpc version to fail parsing"
+  , testCase "unknown tools return JSON-RPC invalid params" $ do
+      st <- mkStreamableState 10
+      payload <- streamableToolsCall Null undefined [] st $
+        Just (object ["name" .= ("does_not_exist" :: T.Text), "arguments" .= object []])
+      objectInt ["error", "code"] payload @?= Just (-32602)
+  , testCase "invalid known-tool arguments return an MCP tool error result" $ do
+      st <- mkStreamableState 10
+      payload <- streamableToolsCall Null undefined [] st $
+        Just (object ["name" .= ("get_events" :: T.Text), "arguments" .= object ["limit" .= (0 :: Int)]])
+      objectBool ["result", "isError"] payload @?= Just True
+  , testCase "unknown resources return JSON-RPC invalid params" $ do
+      st <- mkStreamableState 10
+      payload <- streamableResourcesRead Null undefined [] st $
+        Just (object ["uri" .= ("echidna://bad/resource" :: T.Text)])
+      objectInt ["error", "code"] payload @?= Just (-32602)
+  , testCase "request body reader accepts chunks within the configured limit" $ do
       chunks <- newIORef [BS.replicate 3 65, BS.replicate 2 66, BS.empty]
       result <- streamableStrictRequestBodyWithLimit 5 (nextBodyChunk chunks)
       case result of
@@ -256,14 +288,23 @@ streamableReliabilityTests = testGroup "streamable MCP reliability"
       st <- mkStreamableState 10
       let ts = read "2026-06-06 00:00:00" :: LocalTime
       mapM_ (\i -> recordStreamableEvent defaultMCPConf st ts (Worker.WorkerEvent i Worker.FuzzWorker (Worker.Log ("event-" <> show i)))) [0..4]
-      payload <- streamableEvents st (Map.fromList [("limit", "2")])
+      payload <- streamableEvents st (StreamableEventsArgs Nothing (Just 2))
       eventIds payload @?= [3, 4]
   , testCase "get_events with since returns first events after cursor" $ do
       st <- mkStreamableState 10
       let ts = read "2026-06-06 00:00:00" :: LocalTime
       mapM_ (\i -> recordStreamableEvent defaultMCPConf st ts (Worker.WorkerEvent i Worker.FuzzWorker (Worker.Log ("event-" <> show i)))) [0..4]
-      payload <- streamableEvents st (Map.fromList [("since", "1"), ("limit", "2")])
+      payload <- streamableEvents st (StreamableEventsArgs (Just 1) (Just 2))
       eventIds payload @?= [2, 3]
+  , testCase "zero-transaction failing artifacts remain visible" $ do
+      let artifact = streamableTestArtifact defaultMCPConf 0 (mkStreamableTest 0)
+      assertBool "expected large zero-transaction artifact to be interesting" $
+        streamableArtifactIsInteresting artifact
+      objectBool ["reproducer", "requiresTransactions"] artifact @?= Just False
+  , testCase "reproducer metadata marks redacted calldata" $ do
+      let artifact = streamableTestArtifact defaultMCPConf 0 (mkStreamableTest 1)
+      objectBool ["reproducer", "redacted"] artifact @?= Just True
+      objectText ["reproducer", "callDataPolicy"] artifact @?= Just "redacted"
   , testCase "event payloads are forced before insertion" $ do
       st <- mkStreamableState 10
       let ts = read "2026-06-06 00:00:00" :: LocalTime
@@ -345,6 +386,31 @@ eventIds (Object o) =
     Just (Array xs) -> mapMaybe (objectInt ["id"]) (Vector.toList xs)
     _ -> []
 eventIds _ = []
+
+toolSchemaHasProperty :: T.Text -> T.Text -> Value -> Bool
+toolSchemaHasProperty toolName propName (Object o) =
+  case KM.lookup (K.fromText $ T.pack "tools") o of
+    Just (Array xs) -> any hasProp (Vector.toList xs)
+    _ -> False
+  where
+    hasProp (Object tool) =
+      case KM.lookup (K.fromText $ T.pack "name") tool of
+        Just (String name) | name == toolName ->
+          case KM.lookup (K.fromText $ T.pack "inputSchema") tool of
+            Just (Object schema) ->
+              case KM.lookup (K.fromText $ T.pack "properties") schema of
+                Just (Object props) -> KM.member (K.fromText propName) props
+                _ -> False
+            _ -> False
+        _ -> False
+    hasProp _ = False
+toolSchemaHasProperty _ _ _ = False
+
+objectText :: [T.Text] -> Value -> Maybe T.Text
+objectText [] (String t) = Just t
+objectText (key:keys) (Object o) =
+  KM.lookup (K.fromText key) o >>= objectText keys
+objectText _ _ = Nothing
 
 mkStreamableState :: Int -> IO StreamableMCPState
 mkStreamableState maxEvents = do

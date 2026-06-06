@@ -56,6 +56,12 @@ data MCPConf = MCPConf
   , maxRequestBytes        :: Int
   } deriving (Show, Eq)
 
+validateMCPConf :: MCPConf -> Either String MCPConf
+validateMCPConf conf
+  | not conf.enabled = Right conf
+  | conf.transport == MCPHttp = Right conf
+  | otherwise = Left $ "mcp.transport=" <> show conf.transport <> " is parsed but not implemented"
+
 defaultMCPConf :: MCPConf
 defaultMCPConf = MCPConf
   { enabled = False

@@ -11,7 +11,7 @@ import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 
 import Echidna.Config (defaultConfig, parseConfig)
 import Echidna.Types.Campaign (CampaignConf(..))
-import Echidna.Types.Config (EConfigWithUsage(..), EConfig(..), MCPConf(..))
+import Echidna.Types.Config (EConfigWithUsage(..), EConfig(..), MCPConf(..), MCPTransport(..), defaultMCPConf, validateMCPConf)
 import Echidna.Types.Tx (TxConf(..))
 
 configTests :: TestTree
@@ -79,6 +79,17 @@ configTests = testGroup "Configuration tests" $
         Right (c :: EConfigWithUsage) ->
           assertEqual "maxReproducers" 21 c.econfig.mcpConf.maxReproducerArtifacts
         Left e -> assertFailure $ "unexpected decoding error: " <> show e
+  , testCase "reject enabled unsupported mcp transports" $ do
+      case validateMCPConf defaultMCPConf { enabled = True, transport = MCPUnix } of
+        Left _ -> pure ()
+        Right _ -> assertFailure "expected enabled mcp.transport=unix to be rejected"
+      case validateMCPConf defaultMCPConf { enabled = True, transport = MCPStdio } of
+        Left _ -> pure ()
+        Right _ -> assertFailure "expected enabled mcp.transport=stdio to be rejected"
+  , testCase "allow unsupported mcp transport while mcp is disabled" $
+      case validateMCPConf defaultMCPConf { enabled = False, transport = MCPUnix } of
+        Right _ -> pure ()
+        Left e -> assertFailure $ "unexpected validation error: " <> e
   , testCase "default.yaml" $ do
       EConfigWithUsage _ bad unset <- parseConfig "basic/default.yaml"
       assertBool ("unused options: " ++ show bad) $ null bad
