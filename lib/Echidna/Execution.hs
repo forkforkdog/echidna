@@ -40,7 +40,7 @@ import Echidna.Types.InterWorker (WrappedMessage(..), Message(..), BroadcastMsg(
 import Echidna.SymExec.Symbolic (forceAddr)
 import Echidna.Types.Signature (FunctionName)
 import Echidna.Types.Test
-import Echidna.Test (checkETest, getResultFromVM)
+import Echidna.Test (checkETest, compactVMForReport, getResultFromVM)
 import Echidna.Types.Test qualified as Test
 import Echidna.Types.Tx (TxCall(..), Tx(..), getResult)
 import Echidna.Types.Worker (WorkerEvent(..))
@@ -311,7 +311,7 @@ updateOpenTest vm reproducer test = do
           workerId <- Just <$> gets (.workerId)
           let test' = test { Test.state = Large 0
                            , reproducer
-                           , vm = Just vm
+                           , vm = Just (compactVMForReport vm)
                            , result
                            , workerId
                            }
@@ -321,7 +321,7 @@ updateOpenTest vm reproducer test = do
         IntValue value' | value' > value -> do
           let test' = test { reproducer
                            , value = IntValue value'
-                           , vm = Just vm
+                           , vm = Just (compactVMForReport vm)
                            , result
                            }
           pushWorkerEvent (TestOptimized (test' { Test.vm = Nothing }))

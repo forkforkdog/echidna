@@ -43,6 +43,34 @@ getResultFromVM vm =
     Just r -> getResult r
     Nothing -> error "getResultFromVM failed"
 
+-- | Keep only the VM fields needed by failure reporting.
+compactVMForReport :: VM Concrete -> VM Concrete
+compactVMForReport vm =
+  vm { state = compactFrameState vm.state
+     , frames = []
+     , env = vm.env { contracts = compactContract <$> vm.env.contracts }
+     , tx = vm.tx { subState = emptySubState, txReversion = mempty }
+     , logs = []
+     , pathsVisited = mempty
+     , iterations = mempty
+     , constraints = mempty
+     , forks = mempty
+     , keccakPreImgs = mempty
+     }
+  where
+  compactFrameState st =
+    st { stack = []
+       , calldata = mempty
+       , returndata = mempty
+       }
+  compactContract contract =
+    contract { storage = ConcreteStore mempty
+             , tStorage = ConcreteStore mempty
+             , origStorage = ConcreteStore mempty
+             }
+  emptySubState =
+    SubState [] [] mempty mempty [] mempty
+
 createTest :: TestType -> EchidnaTest
 createTest m = EchidnaTest Open m v [] Stop Nothing Nothing
   where v = case m of
