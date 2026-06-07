@@ -12,7 +12,7 @@ import Data.Set qualified as Set
 import EVM.Types (VM, VMType(..))
 
 import Echidna.Exec
-import Echidna.Test (getResultFromVM, checkETest)
+import Echidna.Test (getResultFromVM, checkETest, compactVMForReport)
 import Echidna.Transaction
 import Echidna.Types.Campaign (CampaignConf(..))
 import Echidna.Types.Config
@@ -46,7 +46,7 @@ shrinkTest vm test = do
               Just (txs, val, vm') -> do
                 Just test { state = Large (i + 1)
                     , reproducer = txs
-                    , vm = Just vm'
+                    , vm = Just (compactVMForReport vm')
                     , result = getResultFromVM vm'
                     , value = val }
               Nothing ->
