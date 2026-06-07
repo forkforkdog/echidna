@@ -640,7 +640,7 @@ updateOpenTest vm reproducer test = do
           workerId <- Just <$> gets (.workerId)
           let test' = test { Test.state = Large 0
                            , reproducer
-                           , vm = Just vm
+                           , vm = Just (compactVMForReport vm)
                            , result
                            , workerId
                            }
@@ -650,7 +650,7 @@ updateOpenTest vm reproducer test = do
         IntValue value' | value' > value -> do
           let test' = test { reproducer
                            , value = IntValue value'
-                           , vm = Just vm
+                           , vm = Just (compactVMForReport vm)
                            , result
                            }
           pushWorkerEvent (TestOptimized test')
