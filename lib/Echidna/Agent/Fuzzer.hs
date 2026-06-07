@@ -63,6 +63,7 @@ data FuzzerAgent = FuzzerAgent
   , initialCorpus :: [(FilePath, [Tx])]
   , testLimit :: Int
   , stateRef :: IORef WorkerState
+  , emitStopEvent :: Bool
   }
 
 instance Show FuzzerAgent where
@@ -106,7 +107,8 @@ instance Agent FuzzerAgent where
                workerChan <- liftIO $ atomically $ dupTChan bus
                fuzzerLoop callback vm limit workerChan
 
-    liftIO $ pushCampaignEvent env (WorkerEvent workerId FuzzWorker (WorkerStopped reason))
+    when agent.emitStopEvent $
+      liftIO $ pushCampaignEvent env (WorkerEvent workerId FuzzWorker (WorkerStopped reason))
 
     return ()
 

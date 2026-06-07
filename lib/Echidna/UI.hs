@@ -256,17 +256,16 @@ ui vm dict initialCorpus cliSelectedContract = do
       -- TODO: maybe figure this out with forkFinally?
       let workerType = workerIDToType env.cfg.campaignConf workerId
       maybeStopReason <- catches (do
-          let
-            timeoutUsecs = maybe (-1) (*1_000_000) env.cfg.uiConf.maxTime
-            corpus = if workerType == SymbolicWorker then initialCorpus else corpusChunk
+          let timeoutUsecs = maybe (-1) (*1_000_000) env.cfg.uiConf.maxTime
+              corpus = if workerType == SymbolicWorker then initialCorpus else corpusChunk
 
           maybeResult <- timeout timeoutUsecs $ case workerType of
-             FuzzWorker -> do
-                 let agent = FuzzerAgent workerId vm dict corpus testLimit stateRef
-                 runAgent agent bus env
-             SymbolicWorker -> do
-                 let agent = SymbolicAgent vm dict corpus cliSelectedContract stateRef
-                 runAgent agent bus env
+            FuzzWorker -> do
+              let agent = FuzzerAgent workerId vm dict corpus testLimit stateRef True
+              runAgent agent bus env
+            SymbolicWorker -> do
+              let agent = SymbolicAgent vm dict corpus cliSelectedContract stateRef
+              runAgent agent bus env
 
           pure $ case maybeResult of
             Just () -> Nothing -- Agent finished and pushed event
@@ -286,7 +285,7 @@ ui vm dict initialCorpus cliSelectedContract = do
             TimeLimitReached | workerType == FuzzWorker -> do
               tests <- traverse readIORef env.testRefs
               when (any needsShrinking tests) $ void $ do
-                let shrinkAgent = FuzzerAgent workerId vm dict [] 0 stateRef
+                let shrinkAgent = FuzzerAgent workerId vm dict [] 0 stateRef False
                 runAgent shrinkAgent bus env
             _ -> pure ()
           time <- liftIO getTimestamp

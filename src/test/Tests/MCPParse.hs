@@ -6,7 +6,8 @@ import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.Map qualified as Map
 import Data.Maybe (isNothing, mapMaybe)
 import Data.Text qualified as T
 import Data.Time (LocalTime, UTCTime)
@@ -40,8 +41,12 @@ import Echidna.MCP
   , StreamableEventsArgs(..)
   , StreamableMCPEvent(..)
   , StreamableMCPState(..)
+  , StreamableCoverageState(..)
+  , StreamableReproducerVerification(..)
   , StreamableRpcRequest(..)
   , recordStreamableEvent
+  , streamableCacheableReproducerVerification
+  , streamableCoverageLines
   , streamableStrictRequestBodyWithLimit
   )
 import Echidna.Types.Config (MCPConf(..), defaultMCPConf)
@@ -345,6 +350,22 @@ streamableReliabilityTests = testGroup "streamable MCP reliability"
           objectArrayLength ["transactions"] ev.streamablePayload @?= Just 0
           objectBool ["transactionsTruncated"] ev.streamablePayload @?= Just True
         _ -> assertFailure ("expected one retained event, got " <> show (length items))
+  , testCase "computed empty coverage is served from cache" $ do
+      st <- mkStreamableState 10
+      writeIORef st.streamableCoverageRef (StreamableCoverageComputed (object []))
+      payload <- streamableCoverageLines undefined st
+      payload @?= object []
+      cached <- readIORef st.streamableCoverageRef
+      case cached of
+        StreamableCoverageComputed snapshot -> snapshot @?= object []
+        _ -> assertFailure "expected computed empty coverage to remain cached"
+  , testCase "transient reproducer replay results are not cached" $ do
+      streamableCacheableReproducerVerification
+        (StreamableReproducerVerification False "unverified" "replay-timeout") @?= False
+      streamableCacheableReproducerVerification
+        (StreamableReproducerVerification False "unverified" "replay-threw") @?= False
+      streamableCacheableReproducerVerification
+        (StreamableReproducerVerification True "verified" "concrete-replay-confirmed") @?= True
   ]
 
 mkStreamableTest :: Int -> EchidnaTest
@@ -436,10 +457,10 @@ objectText _ _ = Nothing
 mkStreamableState :: Int -> IO StreamableMCPState
 mkStreamableState maxEvents = do
   eventsRef <- newIORef (StreamableEventBuffer 0 [])
-  coverageRef <- newIORef (Object mempty)
-  refreshingRef <- newIORef False
+  coverageRef <- newIORef StreamableCoverageNotComputed
+  reproducerCacheRef <- newIORef Map.empty
   let started = read "2026-06-06 00:00:00 UTC" :: UTCTime
-  pure $ StreamableMCPState eventsRef started maxEvents 65536 coverageRef refreshingRef Nothing
+  pure $ StreamableMCPState eventsRef started maxEvents 65536 coverageRef reproducerCacheRef Nothing
 
 nextBodyChunk :: IORef [BS.ByteString] -> IO BS.ByteString
 nextBodyChunk ref =
