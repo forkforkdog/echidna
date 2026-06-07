@@ -108,10 +108,11 @@ runContract f selectedContract cfg workerType = do
              { fuzzerId = 0
              , initialVm = vm
              , initialDict = dict
-             , initialCorpus = []
-             , testLimit = cfg.campaignConf.testLimit
-             , stateRef = stateRef
-             }
+               , initialCorpus = []
+               , testLimit = cfg.campaignConf.testLimit
+               , stateRef = stateRef
+               , emitStopEvent = True
+               }
        runAgent agent bus env
     SymbolicWorker -> do
        let agent = SymbolicAgent
