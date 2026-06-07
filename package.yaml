@@ -58,7 +58,9 @@ library:
     - html-conduit
     - html-entities
     - http-conduit
+    - http-types
     - ListLike
+    - mcp-server
     - mustache
     - optics
     - optics-core
@@ -68,6 +70,7 @@ library:
     - semver
     - signal
     - split
+    - stm
     - strip-ansi-escape
     - time
     - unliftio
@@ -76,6 +79,7 @@ library:
     - vector
     - vty
     - vty-crossplatform
+    - wai
     - wai-extra
     - warp
     - wreq
@@ -89,6 +93,7 @@ executables:
     source-dirs: src/
     dependencies:
       - ansi-terminal
+      - bytestring
       - code-page
       - echidna
       - filepath
@@ -126,9 +131,12 @@ tests:
       - process
       - semver
       - split
+      - stm
       - tasty
       - tasty-hunit
       - tasty-quickcheck
+      - time
+      - vector
       - yaml
     when:
         - condition: (os(linux) || os(windows)) && flag(static)

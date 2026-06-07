@@ -25,9 +25,21 @@ import Echidna.Types.Solidity
 import Echidna.Types.Test (TestConf(..))
 import Echidna.Types.Tx (TxConf(TxConf), maxGasPerBlock, defaultTimeDelay, defaultBlockDelay)
 
+adjustForVerificationMode :: EConfig -> EConfig
+adjustForVerificationMode cfg =
+  if isVerificationMode cfg.solConf.testMode then
+    cfg { campaignConf = cfg.campaignConf
+            { workers = Just 0
+            , seqLen = 1
+            , symExec = True
+            }
+        }
+  else
+    cfg
+
 instance FromJSON EConfig where
   -- retrieve the config from the key usage annotated parse
-  parseJSON x = (.econfig) <$> parseJSON @EConfigWithUsage x
+  parseJSON x = adjustForVerificationMode . (.econfig) <$> parseJSON @EConfigWithUsage x
 
 instance FromJSON EConfigWithUsage where
   -- this runs the parser in a StateT monad which keeps track of the keys
@@ -55,6 +67,7 @@ instance FromJSON EConfigWithUsage where
               <*> testConfParser
               <*> txConfParser
               <*> (UIConf <$> v ..:? "timeout" <*> formatParser)
+              <*> mcpConfParser
               <*> v ..:? "allEvents" ..!= False
               <*> v ..:? "rpcUrl"
               <*> v ..:? "rpcBlock"
@@ -101,6 +114,7 @@ instance FromJSON EConfigWithUsage where
         <*> v ..:? "mutConsts" ..!= defaultMutationConsts
         <*> v ..:? "coverageFormats" ..!= [Txt,Html,Lcov]
         <*> v ..:? "coverageExcludes" ..!= []
+        <*> v ..:? "coverageLineHits" ..!= True
         <*> v ..:? "workers"
         <*> v ..:? "server"
         <*> v ..:? "symExec"            ..!= False
@@ -118,6 +132,31 @@ instance FromJSON EConfigWithUsage where
           Just "bitwuzla"        -> pure Bitwuzla
           Just s                 -> fail $ "Unrecognized SMT solver: " <> s
           Nothing                -> pure Bitwuzla
+
+      mcpConfParser = v ..:? "mcp" >>= \case
+        Nothing -> pure defaultMCPConf
+        Just (Object mcpObj) -> lift $
+          MCPConf
+            <$> mcpObj .:? "enabled" .!= defaultMCPConf.enabled
+            <*> mcpObj .:? "transport" .!= defaultMCPConf.transport
+            <*> mcpObj .:? "host" .!= defaultMCPConf.host
+            <*> mcpObj .:? "port" .!= defaultMCPConf.port
+            <*> mcpObj .:? "socketPath" .!= defaultMCPConf.socketPath
+            <*> mcpObj .:? "maxEvents" .!= defaultMCPConf.maxEvents
+            <*> mcpObj .:? "maxReverts" .!= defaultMCPConf.maxReverts
+            <*> mcpObj .:? "maxTxs" .!= defaultMCPConf.maxTxs
+            <*> ( ((<|>) <$> mcpObj .:? "maxReproducers"
+                         <*> ((<|>) <$> mcpObj .:? "reproducerArtifactsLimit"
+                                   <*> mcpObj .:? "maxReproducerArtifacts"))
+                  .!= defaultMCPConf.maxReproducerArtifacts
+                )
+            <*> mcpObj .:? "maxReproducerTxs" .!= defaultMCPConf.maxReproducerTxs
+            <*> mcpObj .:? "reproducerEventsLimit" .!= defaultMCPConf.reproducerEventsLimit
+            <*> mcpObj .:? "reproducerResultTTLMinutes" .!= defaultMCPConf.reproducerResultTTLMinutes
+            <*> mcpObj .:? "includeCallData" .!= defaultMCPConf.includeCallData
+            <*> mcpObj .:? "maxReproducerJsonBytes" .!= defaultMCPConf.maxReproducerJsonBytes
+            <*> mcpObj .:? "maxRequestBytes" .!= defaultMCPConf.maxRequestBytes
+        Just _ -> fail "mcp must be an object"
 
       solConfParser = SolConf
         <$> v ..:? "contractAddr"    ..!= defaultContractAddr
