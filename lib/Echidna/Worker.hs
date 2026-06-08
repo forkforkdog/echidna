@@ -1,16 +1,17 @@
 module Echidna.Worker where
 
-import Control.Concurrent
+import Control.Concurrent.STM (TChan, atomically, dupTChan, writeTChan)
 import Control.Monad.Reader (MonadReader, MonadIO, liftIO, ask)
 import Control.Monad.State.Strict(MonadState(..), gets)
 import Data.Aeson
 import Data.Text (unpack)
+import Data.Time (LocalTime)
 
-import Echidna.Types.Tx (Tx(..), TxCall(..))
 import Echidna.ABI (encodeSig)
 import Echidna.Types.Campaign
 import Echidna.Types.Config (Env(..), EConfig(..))
 import Echidna.Types.Test
+import Echidna.Types.Tx (Tx(..), TxCall(..))
 import Echidna.Types.Worker
 import Echidna.Utility (getTimestamp)
 
@@ -44,12 +45,19 @@ pushWorkerEvent event = do
   workerId <- gets (.workerId)
   env <- ask
   let workerType = workerIDToType env.cfg.campaignConf workerId
-  liftIO $ pushCampaignEvent env (WorkerEvent workerId workerType event)
+  liftIO $ publishEvent env (WorkerEvent workerId workerType event)
+
+subscribeEvents :: Env -> IO (TChan (LocalTime, CampaignEvent))
+subscribeEvents env =
+  atomically $ dupTChan env.eventQueue
+
+publishEvent :: Env -> CampaignEvent -> IO ()
+publishEvent env event = do
+  time <- liftIO getTimestamp
+  atomically $ writeTChan env.eventQueue (time, event)
 
 pushCampaignEvent :: Env -> CampaignEvent -> IO ()
-pushCampaignEvent env event = do
-  time <- liftIO getTimestamp
-  writeChan env.eventQueue (time, event)
+pushCampaignEvent = publishEvent
 
 ppCampaignEvent :: CampaignEvent -> String
 ppCampaignEvent = \case

@@ -117,7 +117,7 @@ ui vm dict initialCorpus cliSelectedContract = do
             void $ writeBChanNonBlocking uiChannel $ EventReceived ev
 
       -- Attach the log/event forwarder before workers start so early worker
-      -- events (like startup logs) are not lost by dupChan.
+      -- events (like startup logs) are not lost by dupTChan.
       uiEventsForwarderStopVar <- spawnListener forwardEvent
       workers <- spawnWorkers
 
@@ -196,7 +196,7 @@ ui vm dict initialCorpus cliSelectedContract = do
             msg <- runReaderT (ppLogLine vm ev) env
             putStrLn msg
       -- Attach the log/event forwarder before workers start so early worker
-      -- events (like startup logs) are not lost by dupChan.
+      -- events (like startup logs) are not lost by dupTChan.
       uiEventsForwarderStopVar <- spawnListener forwardEvent
       workers <- spawnWorkers
 
@@ -288,8 +288,7 @@ ui vm dict initialCorpus cliSelectedContract = do
                 let shrinkAgent = FuzzerAgent workerId vm dict [] 0 stateRef False
                 runAgent shrinkAgent bus env
             _ -> pure ()
-          time <- liftIO getTimestamp
-          liftIO $ writeChan env.eventQueue (time, WorkerEvent workerId workerType (WorkerStopped stopReason))
+          liftIO $ pushCampaignEvent env (WorkerEvent workerId workerType (WorkerStopped stopReason))
         Nothing -> pure ()
 
     pure (threadId, stateRef)

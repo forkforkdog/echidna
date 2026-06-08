@@ -315,7 +315,7 @@ updateOpenTest vm reproducer test = do
                            , result
                            , workerId
                            }
-          pushWorkerEvent (TestFalsified test')
+          pushWorkerEvent (TestFalsified (test' { Test.vm = Nothing }))
           pure $ Just test'
 
         IntValue value' | value' > value -> do
@@ -324,7 +324,7 @@ updateOpenTest vm reproducer test = do
                            , vm = Just vm
                            , result
                            }
-          pushWorkerEvent (TestOptimized test')
+          pushWorkerEvent (TestOptimized (test' { Test.vm = Nothing }))
           pure $ Just test'
           where
           value =

@@ -10,7 +10,6 @@ import Control.Exception (SomeException, displayException, evaluate, try)
 import Control.Monad (foldM, forever, unless, void, when)
 import Control.Monad.Reader (runReaderT)
 import Control.Concurrent.STM
-import Control.Concurrent.Chan (dupChan, readChan)
 import Data.Aeson (FromJSON(..), Result(..), ToJSON(..), Value(..), encode, fromJSON, object, toJSON, withObject, (.:), (.:?), (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as K
@@ -60,6 +59,7 @@ import Echidna.Types.Campaign
   )
 import Echidna.Types.InterWorker (Bus, Message(..), WrappedMessage(..), AgentId(..), FuzzerCmd(..), BroadcastMsg(..))
 import Echidna.Types.Worker qualified as Worker
+import Echidna.Worker (subscribeEvents)
 import Network.HTTP.Types (ResponseHeaders, Status, hContentType, methodGet, methodPost, status200, status202, status404, status405, status413)
 import Network.Wai (Application, Response, getRequestBodyChunk, pathInfo, requestMethod, responseBuilder, responseLBS)
 import Network.Wai.Handler.Warp (runSettings, setHost, setPort, defaultSettings)
@@ -685,9 +685,9 @@ runStreamableMCPServer env initialVm workerRefs = do
   reproducerCacheRef <- newIORef Map.empty
   let conf = env.cfg.mcpConf
       st = StreamableMCPState eventsRef started (max 1 conf.maxEvents) (fromIntegral $ max 1 conf.maxRequestBytes) coverageRef reproducerCacheRef (Just initialVm)
-  ch <- dupChan env.eventQueue
+  ch <- subscribeEvents env
   _ <- forkIO $ forever $ do
-    (ts, ev) <- readChan ch
+    (ts, ev) <- atomically $ readTChan ch
     result <- try (do
       recordVerifiedStreamableEvent env initialVm conf st ts ev
       streamableMaybeRefreshCoverage env st ev

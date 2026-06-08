@@ -1,6 +1,6 @@
 module Echidna.Server where
 
-import Control.Concurrent
+import Control.Concurrent (MVar, forkIO, putMVar)
 import Control.Monad (forever, when, void)
 import Data.Aeson
 import Data.Binary.Builder (fromLazyByteString)
@@ -9,11 +9,11 @@ import Data.Time (LocalTime)
 import Data.Word (Word16)
 import Network.Wai.EventSource (ServerEvent(..), eventSourceAppIO)
 import Network.Wai.Handler.Warp (run)
-import UnliftIO.STM (atomically, newBroadcastTChanIO, writeTChan, dupTChan, readTChan)
+import UnliftIO.STM (atomically, dupTChan, newBroadcastTChanIO, readTChan, writeTChan)
 
 import Echidna.Types.Config (Env(..))
 import Echidna.Types.Worker
-import Echidna.Worker()
+import Echidna.Worker (subscribeEvents)
 
 newtype SSE = SSE (LocalTime, CampaignEvent)
 
@@ -44,11 +44,11 @@ instance ToJSON SSE where
 runSSEServer :: MVar () -> Env -> Word16 -> Int -> IO ()
 runSSEServer serverStopVar env port nworkers = do
   aliveRef <- newIORef nworkers
-  sseChan <- dupChan env.eventQueue
+  sseChan <- subscribeEvents env
   broadcastChan <- newBroadcastTChanIO
 
   void . forkIO . forever $ do
-    event@(_, campaignEvent) <- readChan sseChan
+    event@(_, campaignEvent) <- atomically $ readTChan sseChan
     let eventName = \case
           WorkerEvent _ _ workerEvent ->
             case workerEvent of

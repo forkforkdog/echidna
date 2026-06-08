@@ -1,8 +1,6 @@
 module Echidna where
 
-import Control.Concurrent (forkIO, newChan, readChan)
 import Control.Concurrent.STM (newBroadcastTChanIO)
-import Control.Monad (forever, void)
 import Control.Monad.Catch (MonadThrow(..))
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
@@ -126,11 +124,7 @@ mkEnv :: EConfig -> BuildOutput -> [EchidnaTest] -> World -> Maybe SlitherInfo -
 mkEnv cfg buildOutput tests world slitherInfo = do
   codehashMap <- newIORef mempty
   chainId <- Onchain.fetchChainIdFrom cfg.rpcUrl
-  eventQueue <- newChan
-  -- Keep the original Chan read cursor advancing. Consumers use dupChan, but
-  -- an unread root cursor would retain the whole event chain, including large
-  -- falsification payloads.
-  void . forkIO . forever $ readChan eventQueue
+  eventQueue <- newBroadcastTChanIO
   bus <- newBroadcastTChanIO
   coverageRefInit <- newIORef mempty
   coverageRefRuntime <- newIORef mempty

@@ -5,7 +5,8 @@
 
 module Echidna.Campaign where
 
-import Control.Concurrent (forkFinally, dupChan, readChan, newEmptyMVar, putMVar, MVar, Chan)
+import Control.Concurrent (MVar, forkFinally, newEmptyMVar, putMVar)
+import Control.Concurrent.STM (TChan, atomically, readTChan)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, asks)
@@ -15,7 +16,7 @@ import Echidna.Types.Campaign () -- For instances if any
 import Echidna.Types.Config (Env(..), EConfig(..))
 import Echidna.Types.Test (EchidnaTest(..), TestState(..))
 import Echidna.Types.Worker (CampaignEvent(..), WorkerEvent(..))
-import Echidna.Worker (getNWorkers)
+import Echidna.Worker (getNWorkers, subscribeEvents)
 
 -- | Given a 'Campaign', check if the test results should be reported as a
 -- success or a failure.
@@ -39,8 +40,8 @@ spawnListener
 spawnListener handler = do
   cfg <- asks (.cfg)
   let nworkers = getNWorkers cfg.campaignConf
-  eventQueue <- asks (.eventQueue)
-  chan <- liftIO $ dupChan eventQueue
+  env <- asks id
+  chan <- liftIO $ subscribeEvents env
   stopVar <- liftIO newEmptyMVar
   liftIO $ void $ forkFinally (listenerLoop handler chan nworkers) (const $ putMVar stopVar ())
   pure stopVar
@@ -51,14 +52,14 @@ listenerLoop
   :: (MonadIO m)
   => ((LocalTime, CampaignEvent) -> m ())
   -- ^ a function that handles the events
-  -> Chan (LocalTime, CampaignEvent)
+  -> TChan (LocalTime, CampaignEvent)
   -- ^ event channel
   -> Int
   -- ^ number of workers which have to stop before loop exits
   -> m ()
 listenerLoop handler chan !workersAlive =
   when (workersAlive > 0) $ do
-    event <- liftIO $ readChan chan
+    event <- liftIO $ atomically $ readTChan chan
     handler event
     case event of
       (_, WorkerEvent _ _ (WorkerStopped _)) -> listenerLoop handler chan (workersAlive - 1)

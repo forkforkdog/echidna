@@ -1,11 +1,10 @@
 module Echidna.Types.Config where
 
-import Control.Concurrent (Chan)
+import Control.Concurrent.STM (TChan)
 import Data.Aeson (FromJSON(..), withText)
 import Data.Aeson.Key (Key)
 import Data.IORef (IORef)
 import Data.Set (Set)
-import Echidna.Types.InterWorker (Bus)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (LocalTime)
@@ -22,6 +21,7 @@ import Echidna.Types.Cache
 import Echidna.Types.Campaign (CampaignConf)
 import Echidna.Types.Corpus (Corpus)
 import Echidna.Types.Coverage (CoverageMap)
+import Echidna.Types.InterWorker (Bus)
 import Echidna.Types.Solidity (SolConf)
 import Echidna.Types.Test (TestConf, EchidnaTest)
 import Echidna.Types.Tx (TxConf)
@@ -137,7 +137,7 @@ data Env = Env
 
   -- | Shared between all workers. Events are fairly rare so contention is
   -- minimal.
-  , eventQueue :: Chan (LocalTime, CampaignEvent)
+  , eventQueue :: TChan (LocalTime, CampaignEvent)
   , bus :: Bus
 
   , testRefs :: [IORef EchidnaTest]
