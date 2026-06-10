@@ -1,0 +1,133 @@
+diff --git a/src/EVM.hs b/src/EVM.hs
+index 0150d64d..2fb9fcf4 100644
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -27,10 +27,10 @@ import EVM.Concrete qualified as Concrete
+ import EVM.CheatsTH
+ import EVM.Effects (Config (..))
+
+-import Control.Monad (unless, when)
++import Control.Monad (forM_, unless, when)
+ import Control.Monad.ST (ST, RealWorld)
+ import Control.Monad.State.Strict (MonadState, State, get, gets, lift, modify', put)
+-import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize)
++import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize, shiftR, (.&.))
+ import Data.ByteArray qualified as BA
+ import Data.ByteString (ByteString)
+ import Data.ByteString qualified as BS
+@@ -757,8 +757,10 @@ exec1 conf = do
+                   use (#state % #memory) >>= \case
+                     ConcreteMemory mem -> do
+                       case y of
+-                        Lit w ->
+-                          copyBytesToMemory (ConcreteBuf (word256Bytes w)) (Lit 32) (Lit 0) x
++                        Lit w ->
++                          case x of
++                            Lit offset -> writeMemoryWord256 mem (unsafeInto offset) w
++                            _ -> copyBytesToMemory (ConcreteBuf (word256Bytes w)) (Lit 32) (Lit 0) x
+                         _ -> do
+                           -- copy out and move to symbolic memory
+                           buf <- freezeMemory mem
+@@ -778,8 +780,10 @@ exec1 conf = do
+                   use (#state % #memory) >>= \case
+                     ConcreteMemory mem -> do
+                       case yByte of
+-                        LitByte byte ->
+-                          copyBytesToMemory (ConcreteBuf (BS.pack [byte])) (Lit 1) (Lit 0) x
++                        LitByte byte ->
++                          case x of
++                            Lit offset -> writeMemoryByte mem (unsafeInto offset) byte
++                            _ -> copyBytesToMemory (ConcreteBuf (BS.pack [byte])) (Lit 1) (Lit 0) x
+                         _ -> do
+                           -- copy out and move to symbolic memory
+                           buf <- freezeMemory mem
+@@ -3280,14 +3284,23 @@ copyBytesToMemory bs size srcOffset memOffset =
+         case (bs, size, srcOffset, memOffset) of
+           (ConcreteBuf b, Lit size', Lit srcOffset', Lit memOffset') -> do
+-            let src =
+-                  if srcOffset' >= unsafeInto (BS.length b) then
+-                    BS.replicate (unsafeInto size') 0
+-                  else
+-                    BS.take (unsafeInto size') $
+-                    padRight (unsafeInto size') $
+-                    BS.drop (unsafeInto srcOffset') b
+-
+-            writeMemory mem (unsafeInto memOffset') src
++            let memOffsetInt = unsafeInto memOffset' :: Int
++                sizeInt = unsafeInto size' :: Int
++                srcLen = BS.length b
++                srcPastEnd = srcOffset' >= unsafeInto srcLen
++                srcOffsetInt = if srcPastEnd then 0 else unsafeInto srcOffset'
++                available = if srcPastEnd then 0 else min sizeInt (srcLen - srcOffsetInt)
++                zeroLen = sizeInt - available
++            memory' <- expandConcreteMemory mem (memOffsetInt + sizeInt)
++            when (available > 0) $ do
++              let src = byteStringToVector $
++                    BS.take available $
++                    BS.drop srcOffsetInt b
++                  dst = VS.Mutable.slice memOffsetInt available memory'
++              VS.unsafeCopy dst src
++            when (zeroLen > 0) $
++              VS.Mutable.set
++                (VS.Mutable.slice (memOffsetInt + available) zeroLen memory')
++                0
+           _ -> do
+             -- copy out and move to symbolic memory
+             buf <- freezeMemory mem
+@@ -3743,24 +3756,38 @@ log2 x = finiteBitSize x - 1 - countLeadingZeros x
+
+ writeMemory :: MutableMemory -> Int -> ByteString -> EVM t ()
+ writeMemory memory offset buf = do
+-  memory' <- expandMemory (offset + BS.length buf)
+-  VS.iforM_ (byteStringToVector buf) $ \i v -> do
+-    VS.Mutable.unsafeWrite memory' (offset + i) v
+-  where
+-  expandMemory requiredSize = do
+-    let currentSize = VS.Mutable.length memory
+-    let toAlloc = requiredSize - currentSize
+-    if toAlloc > 0 then do
+-      -- Keep concrete memory close to the logical EVM size. The previous 2x
+-      -- growth policy retains large transient vectors for low-level calls with
+-      -- dynamic bytes return data.
+-      let targetSize = requiredSize
+-      let toGrow = max 8192 $ targetSize - currentSize
+-      memory' <- VS.Mutable.grow memory toGrow
+-      assign (#state % #memory) (ConcreteMemory memory')
+-      pure memory'
+-    else
+-      pure memory
++  memory' <- expandConcreteMemory memory (offset + BS.length buf)
++  let src = byteStringToVector buf
++      dst = VS.Mutable.slice offset (VS.length src) memory'
++  VS.unsafeCopy dst src
++
++writeMemoryWord256 :: MutableMemory -> Int -> W256 -> EVM t ()
++writeMemoryWord256 memory offset word = do
++  memory' <- expandConcreteMemory memory (offset + 32)
++  forM_ [0 .. 31] $ \i ->
++    VS.Mutable.unsafeWrite memory' (offset + i) $
++      fromIntegral ((word `shiftR` ((31 - i) * 8)) .&. 0xff)
++
++writeMemoryByte :: MutableMemory -> Int -> Word8 -> EVM t ()
++writeMemoryByte memory offset byte = do
++  memory' <- expandConcreteMemory memory (offset + 1)
++  VS.Mutable.unsafeWrite memory' offset byte
++
++expandConcreteMemory :: MutableMemory -> Int -> EVM t MutableMemory
++expandConcreteMemory memory requiredSize = do
++  let currentSize = VS.Mutable.length memory
++  let toAlloc = requiredSize - currentSize
++  if toAlloc > 0 then do
++    -- Keep concrete memory close to the logical EVM size. The previous 2x
++    -- growth policy retains large transient vectors for low-level calls with
++    -- dynamic bytes return data.
++    let targetSize = requiredSize
++    let toGrow = max 8192 $ targetSize - currentSize
++    memory' <- VS.Mutable.grow memory toGrow
++    assign (#state % #memory) (ConcreteMemory memory')
++    pure memory'
++  else
++    pure memory
+
+ freezeMemory :: MutableMemory -> EVM t (Expr Buf)
+ freezeMemory memory =

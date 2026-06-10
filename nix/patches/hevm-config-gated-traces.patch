@@ -1,0 +1,85 @@
+diff -ruN old/src/EVM/Types.hs new/src/EVM/Types.hs
+--- old/src/EVM/Types.hs	2026-06-09 15:50:51
++++ new/src/EVM/Types.hs	2026-06-09 15:51:04
+@@ -771,6 +771,7 @@
+ data RuntimeConfig = RuntimeConfig
+   { allowFFI :: Bool
+   , baseState :: BaseState
++  , traceEnabled :: Bool
+   }
+   deriving (Show)
+
+diff -ruN old/src/EVM.hs new/src/EVM.hs
+--- old/src/EVM.hs	2026-06-09 15:50:51
++++ new/src/EVM.hs	2026-06-09 15:51:19
+@@ -195,6 +195,7 @@
+     , config = RuntimeConfig
+       { allowFFI = o.allowFFI
+       , baseState = o.baseState
++      , traceEnabled = True
+       }
+     , forks = Seq.singleton (ForkState env block mempty "")
+     , currentFork = 0
+@@ -3345,22 +3347,36 @@
+
++traceDataEnabled :: Bool -> TraceData -> Bool
++traceDataEnabled enabled x =
++  enabled ||
++    case x of
++      ErrorTrace _ -> True
++      ConsoleLog _ -> True
++      _ -> False
++
+ pushTrace :: TraceData -> EVM t ()
+ pushTrace x = do
+-  trace <- withTraceLocation x
+-  modifying #traces $
+-    \t -> Zipper.children $ Zipper.insert (Node trace []) t
++  enabled <- use (#config % #traceEnabled)
++  when (traceDataEnabled enabled x) $ do
++    trace <- withTraceLocation x
++    modifying #traces $
++      \t -> Zipper.children $ Zipper.insert (Node trace []) t
+
+ insertTrace :: TraceData -> EVM t ()
+ insertTrace x = do
+-  trace <- withTraceLocation x
+-  modifying #traces $
+-    \t -> Zipper.nextSpace $ Zipper.insert (Node trace []) t
++  enabled <- use (#config % #traceEnabled)
++  when (traceDataEnabled enabled x) $ do
++    trace <- withTraceLocation x
++    modifying #traces $
++      \t -> Zipper.nextSpace $ Zipper.insert (Node trace []) t
+
+ popTrace :: EVM t ()
+-popTrace =
+-  modifying #traces $
+-    \t -> case Zipper.parent t of
+-            Nothing -> internalError "internal internalError(trace root)"
+-            Just t' -> Zipper.nextSpace t'
++popTrace = do
++  enabled <- use (#config % #traceEnabled)
++  when enabled $
++    modifying #traces $
++      \t -> case Zipper.parent t of
++              Nothing -> internalError "internal internalError(trace root)"
++              Just t' -> Zipper.nextSpace t'
+
+ zipperRootForest :: Zipper.TreePos Zipper.Empty a -> Forest a
+ zipperRootForest z =
+@@ -3386,9 +3402,11 @@
+ traceTopLog :: [Expr Log] -> EVM t ()
+ traceTopLog [] = noop
+ traceTopLog ((LogEntry addr bytes topics) : _) = do
+-  trace <- withTraceLocation (EventTrace addr bytes topics)
+-  modifying #traces $
+-    \t -> Zipper.nextSpace (Zipper.insert (Node trace []) t)
++  enabled <- use (#config % #traceEnabled)
++  when (traceDataEnabled enabled (EventTrace addr bytes topics)) $ do
++    trace <- withTraceLocation (EventTrace addr bytes topics)
++    modifying #traces $
++      \t -> Zipper.nextSpace (Zipper.insert (Node trace []) t)
+ traceTopLog ((GVar _) : _) = internalError "unexpected global variable"
+
+ -- * Stack manipulation

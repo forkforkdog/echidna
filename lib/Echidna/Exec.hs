@@ -221,7 +221,25 @@ execTx
   => VM Concrete
   -> Tx
   -> m (VMResult Concrete, VM Concrete)
-execTx vm tx = runStateT (execTxWith (fromEVM (exec defaultConfig)) tx) vm
+execTx vm tx = do
+  (res, vm') <- runStateT (execTxWith (fromEVM (exec defaultConfig)) tx) (resetTxTransientState vm)
+  pure (res, clearTxBookkeeping vm')
+
+resetTxTransientState :: VM Concrete -> VM Concrete
+resetTxTransientState vm =
+  (clearTxBookkeeping vm) { logs = [] }
+
+clearTxBookkeeping :: VM Concrete -> VM Concrete
+clearTxBookkeeping vm =
+  vm { pathsVisited = mempty
+     , iterations = mempty
+     , constraints = mempty
+     , keccakPreImgs = mempty
+     }
+
+setHevmTracesEnabled :: Bool -> VM Concrete -> VM Concrete
+setHevmTracesEnabled enabled vm =
+  vm { config = vm.config { traceEnabled = enabled } }
 
 -- | A type alias for the context we carry while executing instructions
 type CoverageContext = (Bool, Maybe (VMut.IOVector CoverageInfo, Int))
@@ -236,7 +254,9 @@ execTxWithCov tx = do
 
   covContextRef <- liftIO $ newIORef (False, Nothing)
 
+  modify' (setHevmTracesEnabled False)
   r <- execTxWith (execCov env covContextRef) tx
+  modify' (setHevmTracesEnabled False)
 
   (grew, lastLoc) <- liftIO $ readIORef covContextRef
 
