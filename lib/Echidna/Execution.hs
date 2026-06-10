@@ -17,6 +17,7 @@ import Data.IORef (readIORef, atomicModifyIORef', writeIORef)
 import Data.List qualified as List
 import Data.Map (Map, (\\))
 import Data.Map qualified as Map
+import Data.Map.Strict qualified as MapStrict
 import Data.Maybe (isJust, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -140,7 +141,7 @@ callseqWithStateFlush publishState vm txSeq isReplaying = do
       resultMap = returnValues results workerState.genDict.rTypes
       -- union the return results with the new addresses
       !additions = force $ Map.unionsWith Set.union [resultMap, eventDiffs, diffs]
-      !constants' = force $ Map.unionWith Set.union workerState.genDict.constants additions
+      !constants' = force $ MapStrict.unionWith Set.union workerState.genDict.constants additions
       !dictValues' = force $ Set.union
         (mkDictValues $ Set.unions $ Map.elems additions)
         workerState.genDict.dictValues
