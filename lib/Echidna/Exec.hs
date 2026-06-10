@@ -91,6 +91,7 @@ execTxWith executeTx tx = do
     pure $ VMFailure (Revert (ConcreteBuf ""))
   else do
     config <- asks (.cfg)
+    #config % #traceEnabled .= config.allEvents
     when (not config.allEvents) $ #traces .= emptyEvents
     vmBeforeTx <- get
     setupTx tx

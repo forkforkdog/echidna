@@ -1,0 +1,15 @@
+diff --git a/src/EVM.hs b/src/EVM.hs
+index e045196d..d91f50a 100644
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -3810,8 +3810,9 @@ writeMemory :: MutableMemory -> Int -> ByteString -> EVM t ()
+ writeMemory memory offset buf = do
+   memory' <- expandMemory (offset + BS.length buf)
+-  VS.iforM_ (byteStringToVector buf) $ \i v -> do
+-    VS.Mutable.unsafeWrite memory' (offset + i) v
++  let src = byteStringToVector buf
++      dst = VS.Mutable.slice offset (VS.length src) memory'
++  VS.unsafeCopy dst src
+   get >>= emitEchidnaMemDiag "writeMemory" (Just (offset, BS.length buf, offset + BS.length buf))
+   where
+   expandMemory requiredSize = do

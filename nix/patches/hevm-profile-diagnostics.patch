@@ -1,0 +1,117 @@
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -43,12 +43,14 @@
+ import Data.Either (partitionEithers)
+ import Data.Either.Extra (maybeToEither)
+ import Data.Foldable (toList, Foldable(..))
++import Data.IORef (IORef, atomicModifyIORef', newIORef)
+ import Data.List (find, isPrefixOf)
+ import Data.List.Split (splitOn)
+ import Data.Map.Strict (Map)
+ import Data.Map.Strict qualified as Map
+ import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, mapMaybe)
+ import Data.Set (insert, member, fromList)
++import Data.Set qualified as Set
+ import Data.Sequence (Seq)
+ import Data.Sequence qualified as Seq
+ import Data.Text (unpack, pack)
+@@ -61,6 +63,8 @@
+ import Data.Vector.Storable.Mutable qualified as VS.Mutable
+ import Data.Vector.Storable.ByteString (vectorToByteString, byteStringToVector)
+ import Data.Word (Word8, Word64)
++import Debug.Trace (traceEvent)
++import System.IO.Unsafe (unsafePerformIO)
+ import Text.Read (readMaybe)
+ import Witch (into, tryFrom, unsafeInto, tryInto)
+ 
+@@ -3362,7 +3366,82 @@
+   case Zipper.parent z of
+     Nothing -> Zipper.toForest z
+     Just z' -> zipperRootForest (Zipper.nextSpace z')
++
++echidnaMemDiagSeen :: IORef (Set.Set String)
++echidnaMemDiagSeen = unsafePerformIO (newIORef Set.empty)
++{-# NOINLINE echidnaMemDiagSeen #-}
+ 
++emitEchidnaMemDiag :: String -> Maybe (Int, Int, Int) -> VM t -> EVM t ()
++emitEchidnaMemDiag tag writeStats vm = do
++  let memBytes = case vm.state.memory of
++        ConcreteMemory memory -> VS.Mutable.length memory
++        SymbolicMemory _ -> -1
++      memSize = vm.state.memorySize
++      reads = length vm.tx.recordedStorageReads
++      writes = length vm.tx.recordedStorageWrites
++      maxStoreDepth = maximum (0 : fmap (storageDepth . (.storage)) (Map.elems vm.env.contracts))
++      traces = traceNodeCount (zipperRootForest vm.traces)
++      frames = length vm.frames
++      pc = vm.state.pc
++      shouldLog =
++        memBytes >= 1048576 ||
++        reads >= 1024 ||
++        writes >= 1024 ||
++        maxStoreDepth >= 128 ||
++        traces >= 1024 ||
++        maybe False (\(_, _, requiredSize) -> requiredSize >= 1048576) writeStats
++      roundedMem = bucket 1048576 memBytes
++      roundedMemSize = bucket 1048576 (fromIntegral memSize)
++      roundedReads = bucket 1024 reads
++      roundedWrites = bucket 1024 writes
++      roundedStoreDepth = bucket 128 maxStoreDepth
++      roundedTraces = bucket 1024 traces
++      writeStatsMsg = case writeStats of
++        Nothing -> ""
++        Just (offset, len, requiredSize) ->
++          " write_offset_bucket=" <> show (bucket 1048576 offset)
++          <> " write_len_bucket=" <> show (bucket 1048576 len)
++          <> " write_required_bucket=" <> show (bucket 1048576 requiredSize)
++      msg =
++        "echidna-prof-diag"
++        <> " tag=" <> tag
++        <> " pc=" <> show pc
++        <> " frames=" <> show frames
++        <> " mem_bytes_bucket=" <> show roundedMem
++        <> " mem_size_bucket=" <> show roundedMemSize
++        <> " storage_reads_bucket=" <> show roundedReads
++        <> " storage_writes_bucket=" <> show roundedWrites
++        <> " sstore_depth_bucket=" <> show roundedStoreDepth
++        <> " trace_nodes_bucket=" <> show roundedTraces
++        <> writeStatsMsg
++      firstSeen = unsafePerformIO $
++        atomicModifyIORef' echidnaMemDiagSeen $ \seen ->
++          if Set.member msg seen
++          then (seen, False)
++          else (Set.insert msg seen, True)
++  when (shouldLog && firstSeen) $
++    traceEvent
++      msg
++      (pure ())
++
++bucket :: Int -> Int -> Int
++bucket n x =
++  if x <= 0 then x
++  else ((x + n - 1) `div` n) * n
++
++storageDepth :: Expr Storage -> Int
++storageDepth = go 0
++  where
++    go :: Int -> Expr Storage -> Int
++    go n = \case
++      SStore _ _ prev -> go (n + 1) prev
++      _ -> n
++
++traceNodeCount :: Forest a -> Int
++traceNodeCount = sum . fmap go
++  where
++    go (Node _ children) = 1 + traceNodeCount children
++
+ traceForest :: VM t -> Forest Trace
+ traceForest vm = zipperRootForest vm.traces
+ 
+@@ -3745,6 +3809,7 @@
+   memory' <- expandMemory (offset + BS.length buf)
+   VS.iforM_ (byteStringToVector buf) $ \i v -> do
+     VS.Mutable.unsafeWrite memory' (offset + i) v
++  get >>= emitEchidnaMemDiag "writeMemory" (Just (offset, BS.length buf, offset + BS.length buf))
+   where
+   expandMemory requiredSize = do
+     let currentSize = VS.Mutable.length memory

@@ -1,0 +1,28 @@
+diff --git a/src/EVM.hs b/src/EVM.hs
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -1865,23 +1865,10 @@ accessStorageForGas addr key = do
+   pure accessed
+ 
+ recordStorageRead :: Expr EAddr -> W256 -> EVM t ()
+-recordStorageRead addr key = do
+-  rec <- use (#tx % #recordingStorageAccesses)
+-  when rec $
+-    modifying (#tx % #recordedStorageReads) (pushUniqueStorageAccess (addr, key))
++recordStorageRead _ _ = pure ()
+ 
+ recordStorageWrite :: Expr EAddr -> W256 -> EVM t ()
+-recordStorageWrite addr key = do
+-  rec <- use (#tx % #recordingStorageAccesses)
+-  when rec $ do
+-    modifying (#tx % #recordedStorageWrites) (pushUniqueStorageAccess (addr, key))
+-    modifying (#tx % #recordedStorageReads) (pushUniqueStorageAccess (addr, key))
++recordStorageWrite _ _ = pure ()
+-
+-pushUniqueStorageAccess :: Eq a => a -> [a] -> [a]
+-pushUniqueStorageAccess x xs
+-  | x `elem` xs = xs
+-  | otherwise = x : xs
+-
+ -- * Cheat codes
+ 

@@ -1,0 +1,44 @@
+diff --git a/src/EVM.hs b/src/EVM.hs
+index e045196d..1f2df6a 100644
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -3284,11 +3284,26 @@ copyBytesToMemory bs size srcOffset memOffset =
+         case (bs, size, srcOffset, memOffset) of
+           (ConcreteBuf b, Lit size', Lit srcOffset', Lit memOffset') -> do
+-            let src =
+-                  if srcOffset' >= unsafeInto (BS.length b) then
+-                    BS.replicate (unsafeInto size') 0
+-                  else
+-                    BS.take (unsafeInto size') $
+-                    padRight (unsafeInto size') $
+-                    BS.drop (unsafeInto srcOffset') b
+-
+-            writeMemory mem (unsafeInto memOffset') src
++            let memOffsetInt = unsafeInto memOffset' :: Int
++                sizeInt = unsafeInto size' :: Int
++                requiredSize = memOffsetInt + sizeInt
++                currentSize = VS.Mutable.length mem
++                toAlloc = requiredSize - currentSize
++            memory' <-
++              if toAlloc > 0 then do
++                let growthFactor = 2
++                    targetSize = requiredSize * growthFactor
++                    toGrow = max 8192 $ targetSize - currentSize
++                memory' <- VS.Mutable.grow mem toGrow
++                assign (#state % #memory) (ConcreteMemory memory')
++                pure memory'
++              else
++                pure mem
++            let srcLen = BS.length b
++                srcOffsetPastEnd = srcOffset' >= unsafeInto srcLen
++                srcOffsetInt = if srcOffsetPastEnd then 0 else (unsafeInto srcOffset' :: Int)
++                available = if srcOffsetPastEnd then 0 else min sizeInt (srcLen - srcOffsetInt)
++                zeroLen = sizeInt - available
++            when (available > 0) $ do
++              let src = byteStringToVector $ BS.take available $ BS.drop srcOffsetInt b
++                  dst = VS.Mutable.slice memOffsetInt available memory'
++              VS.copy dst src
++            when (zeroLen > 0) $
++              VS.Mutable.set (VS.Mutable.slice (memOffsetInt + available) zeroLen memory') 0
++            get >>= emitEchidnaMemDiag "copyBytesToMemory" (Just (memOffsetInt, sizeInt, requiredSize))
+           _ -> do

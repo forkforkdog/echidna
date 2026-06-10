@@ -1,11 +1,11 @@
 diff --git a/src/EVM.hs b/src/EVM.hs
-index 0150d64d..2fb9fcf4 100644
+index d91f50a..a6c97fb 100644
 --- a/src/EVM.hs
 +++ b/src/EVM.hs
 @@ -27,10 +27,10 @@ import EVM.Concrete qualified as Concrete
  import EVM.CheatsTH
  import EVM.Effects (Config (..))
-
+ 
 -import Control.Monad (unless, when)
 +import Control.Monad (forM_, unless, when)
  import Control.Monad.ST (ST, RealWorld)
@@ -15,8 +15,7 @@ index 0150d64d..2fb9fcf4 100644
  import Data.ByteArray qualified as BA
  import Data.ByteString (ByteString)
  import Data.ByteString qualified as BS
-@@ -757,8 +757,10 @@ exec1 conf = do
-                   use (#state % #memory) >>= \case
+@@ -761,7 +761,9 @@ exec1 conf = do
                      ConcreteMemory mem -> do
                        case y of
 -                        Lit w ->
@@ -28,8 +27,7 @@ index 0150d64d..2fb9fcf4 100644
                          _ -> do
                            -- copy out and move to symbolic memory
                            buf <- freezeMemory mem
-@@ -778,8 +780,10 @@ exec1 conf = do
-                   use (#state % #memory) >>= \case
+@@ -782,7 +784,9 @@ exec1 conf = do
                      ConcreteMemory mem -> do
                        case yByte of
 -                        LitByte byte ->
@@ -41,65 +39,33 @@ index 0150d64d..2fb9fcf4 100644
                          _ -> do
                            -- copy out and move to symbolic memory
                            buf <- freezeMemory mem
-@@ -3280,14 +3284,23 @@ copyBytesToMemory bs size srcOffset memOffset =
-         case (bs, size, srcOffset, memOffset) of
-           (ConcreteBuf b, Lit size', Lit srcOffset', Lit memOffset') -> do
--            let src =
--                  if srcOffset' >= unsafeInto (BS.length b) then
--                    BS.replicate (unsafeInto size') 0
--                  else
--                    BS.take (unsafeInto size') $
--                    padRight (unsafeInto size') $
--                    BS.drop (unsafeInto srcOffset') b
--
--            writeMemory mem (unsafeInto memOffset') src
-+            let memOffsetInt = unsafeInto memOffset' :: Int
-+                sizeInt = unsafeInto size' :: Int
-+                srcLen = BS.length b
-+                srcPastEnd = srcOffset' >= unsafeInto srcLen
-+                srcOffsetInt = if srcPastEnd then 0 else unsafeInto srcOffset'
-+                available = if srcPastEnd then 0 else min sizeInt (srcLen - srcOffsetInt)
-+                zeroLen = sizeInt - available
-+            memory' <- expandConcreteMemory mem (memOffsetInt + sizeInt)
-+            when (available > 0) $ do
-+              let src = byteStringToVector $
-+                    BS.take available $
-+                    BS.drop srcOffsetInt b
-+                  dst = VS.Mutable.slice memOffsetInt available memory'
-+              VS.unsafeCopy dst src
-+            when (zeroLen > 0) $
-+              VS.Mutable.set
-+                (VS.Mutable.slice (memOffsetInt + available) zeroLen memory')
-+                0
-           _ -> do
-             -- copy out and move to symbolic memory
-             buf <- freezeMemory mem
-@@ -3743,24 +3756,38 @@ log2 x = finiteBitSize x - 1 - countLeadingZeros x
-
+@@ -3806,26 +3810,41 @@ log2 x = finiteBitSize x - 1 - countLeadingZeros x
+ 
  writeMemory :: MutableMemory -> Int -> ByteString -> EVM t ()
  writeMemory memory offset buf = do
 -  memory' <- expandMemory (offset + BS.length buf)
--  VS.iforM_ (byteStringToVector buf) $ \i v -> do
--    VS.Mutable.unsafeWrite memory' (offset + i) v
++  memory' <- expandConcreteMemory memory (offset + BS.length buf)
+   let src = byteStringToVector buf
+       dst = VS.Mutable.slice offset (VS.length src) memory'
+   VS.unsafeCopy dst src
+   get >>= emitEchidnaMemDiag "writeMemory" (Just (offset, BS.length buf, offset + BS.length buf))
 -  where
 -  expandMemory requiredSize = do
 -    let currentSize = VS.Mutable.length memory
 -    let toAlloc = requiredSize - currentSize
 -    if toAlloc > 0 then do
--      -- Keep concrete memory close to the logical EVM size. The previous 2x
--      -- growth policy retains large transient vectors for low-level calls with
--      -- dynamic bytes return data.
--      let targetSize = requiredSize
+-      -- As grow does a larger *copy* of the vector on a new place,
+-      -- we double the vector size to avoid the performance impact
+-      -- that would happen with repeated small expansion operations.
+-      let growthFactor = 2
+-      let targetSize = requiredSize * growthFactor
+-      -- Always grow at least 8k
 -      let toGrow = max 8192 $ targetSize - currentSize
 -      memory' <- VS.Mutable.grow memory toGrow
 -      assign (#state % #memory) (ConcreteMemory memory')
 -      pure memory'
 -    else
 -      pure memory
-+  memory' <- expandConcreteMemory memory (offset + BS.length buf)
-+  let src = byteStringToVector buf
-+      dst = VS.Mutable.slice offset (VS.length src) memory'
-+  VS.unsafeCopy dst src
 +
 +writeMemoryWord256 :: MutableMemory -> Int -> W256 -> EVM t ()
 +writeMemoryWord256 memory offset word = do
@@ -107,27 +73,31 @@ index 0150d64d..2fb9fcf4 100644
 +  forM_ [0 .. 31] $ \i ->
 +    VS.Mutable.unsafeWrite memory' (offset + i) $
 +      fromIntegral ((word `shiftR` ((31 - i) * 8)) .&. 0xff)
++  get >>= emitEchidnaMemDiag "writeMemoryWord256" (Just (offset, 32, offset + 32))
 +
 +writeMemoryByte :: MutableMemory -> Int -> Word8 -> EVM t ()
 +writeMemoryByte memory offset byte = do
 +  memory' <- expandConcreteMemory memory (offset + 1)
 +  VS.Mutable.unsafeWrite memory' offset byte
++  get >>= emitEchidnaMemDiag "writeMemoryByte" (Just (offset, 1, offset + 1))
 +
 +expandConcreteMemory :: MutableMemory -> Int -> EVM t MutableMemory
 +expandConcreteMemory memory requiredSize = do
 +  let currentSize = VS.Mutable.length memory
 +  let toAlloc = requiredSize - currentSize
 +  if toAlloc > 0 then do
-+    -- Keep concrete memory close to the logical EVM size. The previous 2x
-+    -- growth policy retains large transient vectors for low-level calls with
-+    -- dynamic bytes return data.
-+    let targetSize = requiredSize
++    -- As grow does a larger *copy* of the vector on a new place,
++    -- we double the vector size to avoid the performance impact
++    -- that would happen with repeated small expansion operations.
++    let growthFactor = 2
++    let targetSize = requiredSize * growthFactor
++    -- Always grow at least 8k
 +    let toGrow = max 8192 $ targetSize - currentSize
 +    memory' <- VS.Mutable.grow memory toGrow
 +    assign (#state % #memory) (ConcreteMemory memory')
 +    pure memory'
 +  else
 +    pure memory
-
+ 
  freezeMemory :: MutableMemory -> EVM t (Expr Buf)
  freezeMemory memory =

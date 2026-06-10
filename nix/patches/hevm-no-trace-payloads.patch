@@ -1,0 +1,57 @@
+diff --git a/src/EVM.hs b/src/EVM.hs
+index 33333333..44444444 100644
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -3063,11 +3063,50 @@ withTraceLocation x = do
+   vm <- get
+   let this = fromJust $ currentContract vm
+   pure Trace
+-    { tracedata = x
+-    , contract = this
++    { tracedata = stripTraceData x
++    , contract = stripTraceContract this
+     , opIx = fromMaybe 0 $ this.opIxMap VS.!? vm.state.pc
+     }
+ 
++stripTraceData :: TraceData -> TraceData
++stripTraceData traceData =
++  case traceData of
++    EventTrace addr _ topics ->
++      EventTrace addr (ConcreteBuf mempty) topics
++    FrameTrace ctx ->
++      FrameTrace (stripTraceFrameContext ctx)
++    ReturnTrace _ ctx ->
++      ReturnTrace (ConcreteBuf mempty) (stripTraceFrameContext ctx)
++    ConsoleLog _ ->
++      ConsoleLog (ConcreteBuf mempty)
++    other -> other
++
++stripTraceFrameContext :: FrameContext -> FrameContext
++stripTraceFrameContext ctx =
++  case ctx of
++    CreationContext addr codehash _ _ ->
++      CreationContext addr codehash mempty emptyTraceSubState
++    CallContext target context offset size codehash abi _ _ _ ->
++      CallContext target context offset size codehash abi (ConcreteBuf mempty) mempty emptyTraceSubState
++
++stripTraceContract :: Contract -> Contract
++stripTraceContract c =
++  c
++    { storage = ConcreteStore mempty
++    , tStorage = ConcreteStore mempty
++    , origStorage = ConcreteStore mempty
++    }
++
++emptyTraceSubState :: SubState
++emptyTraceSubState = SubState
++  { selfdestructs = []
++  , touchedAccounts = []
++  , accessedAddresses = mempty
++  , accessedStorageKeys = mempty
++  , refunds = []
++  , createdContracts = mempty
++  }
++
+ pushTrace :: TraceData -> EVM t ()
+ pushTrace x = do
+   trace <- withTraceLocation x

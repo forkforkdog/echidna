@@ -58,7 +58,7 @@
           (lib.getLib numactl)
         ];
 
-        hevm = pkgs: pkgs.lib.pipe 
+        hevmWithExtraPatches = extraPatches: pkgs: pkgs.lib.pipe
           (pkgs.haskellPackages.callCabal2nix "hevm" (pkgs.applyPatches {
             src = pkgs.fetchFromGitHub {
               owner = "argotorg";
@@ -72,11 +72,35 @@
               ./nix/patches/hevm-compact-trace-retention.patch
               ./nix/patches/hevm-direct-memory-copy-no-pad.patch
               ./nix/patches/hevm-config-gated-traces.patch
-            ];
+            ] ++ extraPatches;
           }) { secp256k1 = pkgs.secp256k1; })
           ([
             pkgs.haskell.lib.compose.dontCheck
           ]);
+
+        hevm = hevmWithExtraPatches [];
+        hevmNoStorageRecording = hevmWithExtraPatches [ ./nix/patches/hevm-no-storage-recording.patch ];
+        hevmNoTrace = hevmWithExtraPatches [ ./nix/patches/hevm-no-trace.patch ];
+        hevmNoTracePayloads = hevmWithExtraPatches [ ./nix/patches/hevm-no-trace-payloads.patch ];
+        hevmClearStorageAccesses = hevmWithExtraPatches [ ./nix/patches/hevm-clear-storage-accesses.patch ];
+        hevmProfileDiagnostics = hevmWithExtraPatches [ ./nix/patches/hevm-profile-diagnostics.patch ];
+        hevmProfileWriteMemoryCopy = hevmWithExtraPatches [
+          ./nix/patches/hevm-profile-diagnostics.patch
+          ./nix/patches/hevm-write-memory-copy.patch
+        ];
+        hevmProfileCopyBytesNoPad = hevmWithExtraPatches [
+          ./nix/patches/hevm-profile-diagnostics.patch
+          ./nix/patches/hevm-copy-bytes-no-pad.patch
+        ];
+        hevmProfileDirectMstore = hevmWithExtraPatches [
+          ./nix/patches/hevm-profile-diagnostics.patch
+          ./nix/patches/hevm-write-memory-copy.patch
+          ./nix/patches/hevm-direct-mstore.patch
+        ];
+        hevmDirectMstoreNoDiag = hevmWithExtraPatches [
+          ./nix/patches/hevm-write-memory-copy-no-diag.patch
+          ./nix/patches/hevm-direct-mstore-no-diag.patch
+        ];
 
         mcp-server = pkgs: pkgs.haskellPackages.callCabal2nix "mcp-server" (pkgs.fetchFromGitHub {
           owner = "gustavo-grieco";
@@ -85,14 +109,40 @@
           sha256 = "sha256-lh65Gy8a43xbDDFPONOJ2UBUS1xWOW2UUx3wYFTG8Xg=";
         }) {};
 
-        echidna = pkgs: with pkgs; lib.pipe
-          (haskellPackages.callCabal2nix "echidna" ./. { hevm = hevm pkgs; mcp-server = mcp-server pkgs; })
+        echidnaWithHevm = hevmFor: pkgs: with pkgs; lib.pipe
+          (haskellPackages.callCabal2nix "echidna" ./. { hevm = hevmFor pkgs; mcp-server = mcp-server pkgs; })
           ([
             # FIXME: figure out solc situation, it conflicts with the one from
             # solc-select that is installed with slither, disable tests in the meantime
             haskell.lib.compose.dontCheck
             (haskell.lib.compose.addTestToolDepends [ haskellPackages.hpack slither-analyzer solc ])
             (haskell.lib.compose.disableCabalFlag "static")
+          ]);
+
+        echidna = echidnaWithHevm hevm;
+
+        echidnaProfileWithHevm = hevmFor: pkgs: with pkgs; lib.pipe
+          (echidnaWithHevm hevmFor pkgs)
+          ([
+            haskell.lib.compose.enableLibraryProfiling
+            haskell.lib.compose.enableExecutableProfiling
+            (haskell.lib.compose.appendConfigureFlags [
+              "--ghc-option=-fprof-auto"
+              "--ghc-option=-fprof-cafs"
+              "--ghc-option=-eventlog"
+              "--ghc-option=-rtsopts"
+            ])
+          ]);
+
+        echidnaProfileWithHevmAndRtsOpts = hevmFor: rtsOpts: pkgs: with pkgs; lib.pipe
+          (echidnaProfileWithHevm hevmFor pkgs)
+          ([
+            (haskell.lib.compose.overrideCabal (old: {
+              postPatch = (old.postPatch or "") + ''
+                substituteInPlace echidna.cabal \
+                  --replace '"-with-rtsopts=-A64m -N"' '"-with-rtsopts=${rtsOpts}"'
+              '';
+            }))
           ]);
 
         echidna-static = with pkgsGHC; lib.pipe
@@ -167,6 +217,21 @@
       in rec {
         packages.echidna = echidna pkgs;
         packages.default = echidna pkgs;
+        packages.echidna-profile = echidnaProfileWithHevm hevm pkgs;
+        packages.echidna-profile-rts-n3-a16m = echidnaProfileWithHevmAndRtsOpts hevm "-N3 -A16m" pkgs;
+        packages.echidna-profile-no-storage-recording = echidnaProfileWithHevm hevmNoStorageRecording pkgs;
+        packages.echidna-profile-no-storage-recording-rts-n3-a16m = echidnaProfileWithHevmAndRtsOpts hevmNoStorageRecording "-N3 -A16m" pkgs;
+        packages.echidna-profile-no-trace = echidnaProfileWithHevm hevmNoTrace pkgs;
+        packages.echidna-profile-no-trace-rts-n3-a16m = echidnaProfileWithHevmAndRtsOpts hevmNoTrace "-N3 -A16m" pkgs;
+        packages.echidna-profile-no-trace-payloads-rts-n3-a16m = echidnaProfileWithHevmAndRtsOpts hevmNoTracePayloads "-N3 -A16m" pkgs;
+        packages.echidna-profile-clear-storage-accesses-rts-n3-a16m = echidnaProfileWithHevmAndRtsOpts hevmClearStorageAccesses "-N3 -A16m" pkgs;
+        packages.echidna-profile-diagnostics = echidnaProfileWithHevm hevmProfileDiagnostics pkgs;
+        packages.echidna-profile-write-memory-copy = echidnaProfileWithHevm hevmProfileWriteMemoryCopy pkgs;
+        packages.echidna-profile-copy-bytes-no-pad = echidnaProfileWithHevm hevmProfileCopyBytesNoPad pkgs;
+        packages.echidna-profile-direct-mstore = echidnaProfileWithHevm hevmProfileDirectMstore pkgs;
+        packages.echidna-profile-direct-mstore-rts-n3-a16m = echidnaProfileWithHevmAndRtsOpts hevmProfileDirectMstore "-N3 -A16m" pkgs;
+        packages.echidna-profile-direct-mstore-no-diag = echidnaProfileWithHevm hevmDirectMstoreNoDiag pkgs;
+        packages.echidna-profile-direct-mstore-no-diag-rts-n3-a16m = echidnaProfileWithHevmAndRtsOpts hevmDirectMstoreNoDiag "-N3 -A16m" pkgs;
 
         packages.echidna-redistributable = echidnaRedistributable;
 

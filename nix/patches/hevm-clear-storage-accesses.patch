@@ -1,0 +1,12 @@
+diff --git a/src/EVM.hs b/src/EVM.hs
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -2008,6 +2008,9 @@ cheatActions = Map.fromList
+                     readsV = V.fromList (fmap toBytes32 readsSlots)
+                     writesV = V.fromList (fmap toBytes32 writeSlots)
++                assign (#tx % #recordingStorageAccesses) False
++                assign (#tx % #recordedStorageReads) []
++                assign (#tx % #recordedStorageWrites) []
+                 frameReturn $ AbiTuple $ V.fromList
+                   [ AbiArrayDynamic (AbiBytesType 32) readsV
+                   , AbiArrayDynamic (AbiBytesType 32) writesV

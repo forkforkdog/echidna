@@ -8,7 +8,7 @@ diff -ruN old/src/EVM/Types.hs new/src/EVM/Types.hs
 +  , traceEnabled :: Bool
    }
    deriving (Show)
-
+ 
 diff -ruN old/src/EVM.hs new/src/EVM.hs
 --- old/src/EVM.hs	2026-06-09 15:50:51
 +++ new/src/EVM.hs	2026-06-09 15:51:19
@@ -20,6 +20,16 @@ diff -ruN old/src/EVM.hs new/src/EVM.hs
        }
      , forks = Seq.singleton (ForkState env block mempty "")
      , currentFork = 0
+@@ -2430,7 +2431,8 @@
+               , parentHash = 0
+               , txdataFloorGas = vm.tx.txdataFloorGas
+               }
+-        nested0 <- lift $ makeVm opts
++        nested0' <- lift $ makeVm opts
++        let nested0 = nested0' & set (#config % #traceEnabled) vm.config.traceEnabled
+         nested1 <- lift $ execStateT (assign (#state % #static) True) nested0
+         runNestedVM nested1 $ \nestedF -> do
+           let
 @@ -3345,22 +3347,36 @@
 
 +traceDataEnabled :: Bool -> TraceData -> Bool
@@ -40,7 +50,7 @@ diff -ruN old/src/EVM.hs new/src/EVM.hs
 +    trace <- withTraceLocation x
 +    modifying #traces $
 +      \t -> Zipper.children $ Zipper.insert (Node trace []) t
-
+ 
  insertTrace :: TraceData -> EVM t ()
  insertTrace x = do
 -  trace <- withTraceLocation x
@@ -51,7 +61,7 @@ diff -ruN old/src/EVM.hs new/src/EVM.hs
 +    trace <- withTraceLocation x
 +    modifying #traces $
 +      \t -> Zipper.nextSpace $ Zipper.insert (Node trace []) t
-
+ 
  popTrace :: EVM t ()
 -popTrace =
 -  modifying #traces $
@@ -65,7 +75,7 @@ diff -ruN old/src/EVM.hs new/src/EVM.hs
 +      \t -> case Zipper.parent t of
 +              Nothing -> internalError "internal internalError(trace root)"
 +              Just t' -> Zipper.nextSpace t'
-
+ 
  zipperRootForest :: Zipper.TreePos Zipper.Empty a -> Forest a
  zipperRootForest z =
 @@ -3386,9 +3402,11 @@
@@ -81,5 +91,5 @@ diff -ruN old/src/EVM.hs new/src/EVM.hs
 +    modifying #traces $
 +      \t -> Zipper.nextSpace (Zipper.insert (Node trace []) t)
  traceTopLog ((GVar _) : _) = internalError "unexpected global variable"
-
+ 
  -- * Stack manipulation

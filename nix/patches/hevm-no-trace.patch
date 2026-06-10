@@ -1,0 +1,29 @@
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -3339,23 +3339,13 @@
+     }
+ 
+ pushTrace :: TraceData -> EVM t ()
+-pushTrace x = do
+-  trace <- withTraceLocation x
+-  modifying #traces $
+-    \t -> Zipper.children $ Zipper.insert (Node trace []) t
++pushTrace _ = noop
+ 
+ insertTrace :: TraceData -> EVM t ()
+-insertTrace x = do
+-  trace <- withTraceLocation x
+-  modifying #traces $
+-    \t -> Zipper.nextSpace $ Zipper.insert (Node trace []) t
++insertTrace _ = noop
+ 
+ popTrace :: EVM t ()
+-popTrace =
+-  modifying #traces $
+-    \t -> case Zipper.parent t of
+-            Nothing -> internalError "internal internalError(trace root)"
+-            Just t' -> Zipper.nextSpace t'
++popTrace = noop
+ 
+ zipperRootForest :: Zipper.TreePos Zipper.Empty a -> Forest a
+ zipperRootForest z =

@@ -67,7 +67,7 @@ index e045196d..0150d64d 100644
                    ensureGas g_callstipend $ do
                      let storage_cost
                            | (currentVal == newVal) = g_sload
-@@ -1854,6 +1864,19 @@ accessStorageForGas addr key = do
+@@ -1854,6 +1864,24 @@ accessStorageForGas addr key = do
    unless accessed $ assign (#tx % #subState % #accessedStorageKeys) (insert (addr, key) accessedStrkeys)
    pure accessed
  
@@ -75,19 +75,24 @@ index e045196d..0150d64d 100644
 +recordStorageRead addr key = do
 +  rec <- use (#tx % #recordingStorageAccesses)
 +  when rec $
-+    modifying (#tx % #recordedStorageReads) ((addr, key) :)
++    modifying (#tx % #recordedStorageReads) (pushUniqueStorageAccess (addr, key))
 +
 +recordStorageWrite :: Expr EAddr -> W256 -> EVM t ()
 +recordStorageWrite addr key = do
 +  rec <- use (#tx % #recordingStorageAccesses)
 +  when rec $ do
-+    modifying (#tx % #recordedStorageWrites) ((addr, key) :)
-+    modifying (#tx % #recordedStorageReads) ((addr, key) :)
++    modifying (#tx % #recordedStorageWrites) (pushUniqueStorageAccess (addr, key))
++    modifying (#tx % #recordedStorageReads) (pushUniqueStorageAccess (addr, key))
++
++pushUniqueStorageAccess :: Eq a => a -> [a] -> [a]
++pushUniqueStorageAccess x xs
++  | x `elem` xs = xs
++  | otherwise = x : xs
 +
  -- * Cheat codes
  
  -- The cheat code is 7109709ecfa91a80626ff3989d68f67f5b1dd12d.
-@@ -1942,6 +1965,18 @@ cheatActions = Map.fromList
+@@ -1942,6 +1970,18 @@ cheatActions = Map.fromList
                doStop
          _ -> vmError (BadCheatCode "deal(address,uint256) parameter decoding failed" sig)
  
@@ -106,7 +111,7 @@ index e045196d..0150d64d 100644
    , action "assume(bool)" $
        \sig input -> case decodeStaticArgs 0 1 input of
          [c] -> do
-@@ -1958,6 +1993,46 @@ cheatActions = Map.fromList
+@@ -1958,6 +1998,46 @@ cheatActions = Map.fromList
            doStop
          _ -> vmError (BadCheatCode "roll(uint256) parameter decoding failed" sig)
  
@@ -153,7 +158,7 @@ index e045196d..0150d64d 100644
    , action "store(address,bytes32,bytes32)" $
        \sig input -> case decodeStaticArgs 0 3 input of
          [a, slot, new] -> case wordToAddr a of
-@@ -2217,6 +2292,198 @@ cheatActions = Map.fromList
+@@ -2217,6 +2297,198 @@ cheatActions = Map.fromList
    ]
    where
      action s f = (abiKeccak s, f (abiKeccak s))
