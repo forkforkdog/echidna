@@ -59,11 +59,19 @@
         ];
 
         hevm = pkgs: pkgs.lib.pipe 
-          (pkgs.haskellPackages.callCabal2nix "hevm" (pkgs.fetchFromGitHub {
-            owner = "argotorg";
-            repo = "hevm";
-            rev = "8b2cb6266413f7f964e49053a278a895a21dc507";
-            sha256 = "sha256-wHkH26sfGLEL6XFYl+qZUPdWRZLnoftTqpufy5ASX7k=";
+          (pkgs.haskellPackages.callCabal2nix "hevm" (pkgs.applyPatches {
+            src = pkgs.fetchFromGitHub {
+              owner = "argotorg";
+              repo = "hevm";
+              rev = "8b2cb6266413f7f964e49053a278a895a21dc507";
+              sha256 = "sha256-wHkH26sfGLEL6XFYl+qZUPdWRZLnoftTqpufy5ASX7k=";
+            };
+            patches = [
+              ./nix/patches/hevm-concrete-memory-no-overgrow.patch
+              ./nix/patches/hevm-compact-trace-retention.patch
+              ./nix/patches/hevm-direct-memory-copy-no-pad.patch
+              ./nix/patches/hevm-config-gated-traces.patch
+            ];
           }) { secp256k1 = pkgs.secp256k1; })
           ([
             pkgs.haskell.lib.compose.dontCheck

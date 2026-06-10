@@ -40,26 +40,28 @@ extractEvents :: Bool -> DappInfo -> VM Concrete -> Events
 extractEvents decodeErrors dappInfo vm =
   let forest = traceForest vm
   in maybeToList (decodeRevert decodeErrors vm)
+     ++ catMaybes (showLog <$> reverse vm.logs)
      ++ concatMap ((catMaybes . flatten) . fmap showTrace) forest
   where
+  showLog logEntry =
+    let ?context = DappContext { info = dappInfo, contracts = vm.env.contracts, labels = vm.labels } in
+    case logEntry of
+      LogEntry addr bytes (topic:_) ->
+        case Map.lookup (forceWord topic) dappInfo.eventMap of
+          Just (Event name _ types) ->
+            Just $
+              name
+              <> showValues [t | (_, t, NotIndexed) <- types] bytes
+              <> " from: "
+              <> pack (show $ forceWord addr)
+          Nothing -> Just $ pack $ show (forceWord topic)
+      _ -> Nothing
+
   showTrace trace =
     let ?context = DappContext { info = dappInfo, contracts = vm.env.contracts, labels = vm.labels } in
     let codehash' = fromJust $ maybeLitWordSimp trace.contract.codehash
         maybeContractName = maybeContractNameFromCodeHash dappInfo codehash'
     in case trace.tracedata of
-      EventTrace addr bytes (topic:_) ->
-        case Map.lookup (forceWord topic) dappInfo.eventMap of
-          Just (Event name _ types) ->
-            -- TODO this is where indexed types are filtered out
-            -- they are filtered out for a reason as they only contain
-            -- the topic hash which is printed super verbose by dapptools
-            Just $
-              name
-              <> showValues [t | (_, t, NotIndexed) <- types] bytes
-              <> " from: "
-              <> maybe mempty (<> "@") maybeContractName
-              <> pack (show $ forceWord addr)
-          Nothing -> Just $ pack $ show (forceWord topic)
       ErrorTrace e ->
         case e of
           Revert out ->
@@ -82,11 +84,11 @@ extractEvents decodeErrors dappInfo vm =
 extractEventValues :: DappInfo -> VM Concrete -> VM Concrete -> Map AbiType (Set AbiValue)
 extractEventValues dappInfo vm vm' =
   let
-    oldLogs = vm.logs
+    oldLen = length vm.logs
     newLogs = vm'.logs
 
-    -- only the newly emitted entries
-    delta   = filter (`notElem` oldLogs) newLogs
+    -- hevm conses new logs onto the front of VM.logs.
+    delta = take (length newLogs - oldLen) newLogs
 
     -- decode each Expr Log
     goLog = \case

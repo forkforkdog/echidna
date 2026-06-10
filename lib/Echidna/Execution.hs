@@ -86,7 +86,8 @@ callseq vm txSeq isReplaying = do
 
   -- Run each call sequentially. This gives us the result of each call
   -- and the new state
-  (results, vm') <- evalSeq vm execFunc txSeq
+  let vm0 = resetTxTransientState vm
+  (results, vm', eventDiffs) <- evalSeq vm0 execFunc txSeq
 
   -- Update sample stats for any tracked functions. Off the hot path when
   -- no functions are sampled (the common case).
@@ -127,15 +128,16 @@ callseq vm txSeq isReplaying = do
       diffs = Map.fromList [(AbiAddressType, Set.fromList $ AbiAddress . forceAddr <$> newAddrs)]
       -- Now we try to parse the return values as solidity constants, and add them to 'GenDict'
       resultMap = returnValues results workerState.genDict.rTypes
-      -- compute the new events to be stored
-      eventDiffs = extractEventValues env.dapp vm vm'
       -- union the return results with the new addresses
-      additions = Map.unionsWith Set.union [resultMap, eventDiffs, diffs]
+      !additions = force $ Map.unionsWith Set.union [resultMap, eventDiffs, diffs]
+      !constants' = force $ Map.unionWith Set.union workerState.genDict.constants additions
+      !dictValues' = force $ Set.union
+        (mkDictValues $ Set.unions $ Map.elems additions)
+        workerState.genDict.dictValues
       -- append to the constants dictionary
       updatedDict = workerState.genDict
-        { constants = Map.unionWith Set.union workerState.genDict.constants additions
-        , dictValues = Set.union (mkDictValues $ Set.unions $ Map.elems additions)
-                                 workerState.genDict.dictValues
+        { constants = constants'
+        , dictValues = dictValues'
         }
 
     -- Update the worker state
@@ -147,7 +149,7 @@ callseq vm txSeq isReplaying = do
       , ncallseqs = workerState.ncallseqs + 1
       }
 
-  pure (vm', newCoverage)
+  pure (resetTxTransientState vm', newCoverage)
 
   where
   -- Given a list of transactions and a return typing rule, checks whether we
@@ -225,7 +227,8 @@ execTxOptC
   => VM Concrete -> Tx
   -> m (VMResult Concrete, VM Concrete)
 execTxOptC vm tx = do
-  ((res, grew), vm') <- runStateT (execTxWithCov tx) vm
+  ((res, grew), vm') <- runStateT (execTxWithCov tx) (resetTxTransientState vm)
+  let vm'' = clearTxBookkeeping vm'
   when grew $ do
     modify' $ \workerState ->
       let
@@ -233,7 +236,7 @@ execTxOptC vm tx = do
           SolCall c -> gaddCalls (Set.singleton c) workerState.genDict
           _ -> workerState.genDict
       in workerState { newCoverage = True, genDict = dict' }
-  pure (res, vm')
+  pure (res, vm'')
 
 -- | Given an initial 'VM' state and a way to run transactions, evaluate a list
 -- of transactions, constantly checking if we've solved any tests.
@@ -242,23 +245,27 @@ evalSeq
   => VM Concrete -- ^ Initial VM
   -> (VM Concrete -> Tx -> m (result, VM Concrete))
   -> [Tx]
-  -> m ([(Tx, result)], VM Concrete)
-evalSeq vm0 execFunc = go vm0 [] where
-  go vm executedSoFar toExecute = do
+  -> m ([(Tx, result)], VM Concrete, Map AbiType (Set AbiValue))
+evalSeq vm0 execFunc = go vm0 [] Map.empty where
+  go vm executedSoFar eventDiffs toExecute = do
     -- NOTE: we do reverse here because we build up this list by prepending,
     -- see the last line of this function.
     updateTests (updateOpenTest vm (reverse executedSoFar))
     modify' $ \workerState -> workerState { ncalls = workerState.ncalls + 1 }
     case toExecute of
-      [] -> pure ([], vm)
+      [] -> pure ([], resetTxTransientState vm, eventDiffs)
       (tx:remainingTxs) -> do
         (result, vm') <- execFunc vm tx
+        env <- ask
+        let
+          !txEventDiffs = force $ extractEventValues env.dapp (vm { logs = [] }) vm'
+          !eventDiffs' = force $ Map.unionWith Set.union txEventDiffs eventDiffs
         modify' $ \workerState -> workerState { totalGas = workerState.totalGas + fromIntegral (vm'.burned - vm.burned) }
         -- NOTE: we don't use the intermediate VMs, just the last one. If any of
         -- the intermediate VMs are needed, they can be put next to the result
         -- of each transaction - `m ([(Tx, result, VM)])`
-        (remaining, vm'') <- go vm' (tx:executedSoFar) remainingTxs
-        pure ((tx, result) : remaining, vm'')
+        (remaining, vm'', eventDiffs'') <- go vm' (tx:executedSoFar) eventDiffs' remainingTxs
+        pure ((tx, result) : remaining, vm'', eventDiffs'')
 
 -- | Update tests based on the return value from the given function.
 -- Nothing skips the update.

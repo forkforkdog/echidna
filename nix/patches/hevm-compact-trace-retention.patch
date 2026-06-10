@@ -1,0 +1,51 @@
+diff --git a/src/EVM.hs b/src/EVM.hs
+index 0150d64d..4f0cf767 100644
+--- a/src/EVM.hs
++++ b/src/EVM.hs
+@@ -2994,7 +2994,12 @@ replaceCodeOfSelf newCode = do
+ resetState :: VMOps t => EVM t ()
+ resetState = do
+   state <- lift blankState
+-  modify' $ \vm -> vm { result = Nothing, frames = [], state }
++  modify' $ \vm -> vm
++    { result = Nothing
++    , frames = []
++    , state
++    , traces = Zipper.fromForest []
++    }
+
+ -- * VM error implementation
+ vmError :: VMOps t => EvmError -> EVM t ()
+@@ -3332,10 +3337,30 @@ withTraceLocation :: TraceData -> EVM t Trace
+ withTraceLocation x = do
+   vm <- get
+   let this = fromJust $ currentContract vm
++      traceContract =
++        this
++          { storage = ConcreteStore mempty
++          , tStorage = ConcreteStore mempty
++          , origStorage = ConcreteStore mempty
++          }
++      traceSubState = SubState [] [] mempty mempty [] mempty
++      traceContext = \case
++        c@CallContext {} ->
++          c { callreversion = mempty
++            , subState = traceSubState
++            }
++        c@CreationContext {} ->
++          c { createreversion = mempty
++            , subState = traceSubState
++            }
++      traceData = \case
++        FrameTrace context -> FrameTrace (traceContext context)
++        ReturnTrace output context -> ReturnTrace output (traceContext context)
++        other -> other
+   pure Trace
+-    { tracedata = x
+-    , contract = this
++    { tracedata = traceData x
++    , contract = traceContract
+     , opIx = fromMaybe 0 $ this.opIxMap VS.!? vm.state.pc
+     }
+
+ pushTrace :: TraceData -> EVM t ()
