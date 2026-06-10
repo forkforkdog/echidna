@@ -1,0 +1,6 @@
+{
+  "contractName": "GetCodeVersioned",
+  "sourceName": "GetCodeVersioned.sol",
+  "compiler": { "version": "0.8.19" },
+  "bytecode": { "object": "0x60186000556019600055" }
+}

@@ -1,0 +1,6 @@
+{
+  "contractName": "GetCodeWidget",
+  "sourceName": "GetCodeWidget.sol",
+  "compiler": { "version": "0.8.18" },
+  "bytecode": { "object": "0x60016000556002600055" }
+}

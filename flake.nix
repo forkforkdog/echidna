@@ -72,6 +72,7 @@
               ./nix/patches/hevm-compact-trace-retention.patch
               ./nix/patches/hevm-direct-memory-copy-no-pad.patch
               ./nix/patches/hevm-config-gated-traces.patch
+              ./nix/patches/hevm-getcode.patch
             ] ++ extraPatches;
           }) { secp256k1 = pkgs.secp256k1; })
           ([

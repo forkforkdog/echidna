@@ -21,4 +21,11 @@ cheatTests =
         , ("withNothing failed",             passed "withNothing")
         , ("withDoubleDeploy failed",        passed "withDoubleDeploy")
         ]
+    , testContract' "cheat/getCode.sol" (Just "TestGetCode") (Just (> solcV (0,5,0))) (Just "cheat/getCode.yaml") False FuzzWorker
+        [ ("echidna_getCode_success_paths failed", passed "echidna_getCode_success_paths")
+        , ("echidna_getCode_rejects_bad_inputs failed", passed "echidna_getCode_rejects_bad_inputs")
+        ]
+    , testContract' "cheat/getCode.sol" (Just "TestGetCodeNoFFI") (Just (> solcV (0,5,0))) (Just "cheat/getCode_noffi.yaml") False FuzzWorker
+        [ ("echidna_getCode_reverts_without_allowffi failed", passed "echidna_getCode_reverts_without_allowffi")
+        ]
     ]

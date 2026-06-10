@@ -1,0 +1,6 @@
+{
+  "contractName": "GetCodeUnlinked",
+  "sourceName": "GetCodeUnlinked.sol",
+  "compiler": { "version": "0.8.18" },
+  "bytecode": { "object": "0x6000__$0123456789abcdef0123456789abcdef12$__" }
+}

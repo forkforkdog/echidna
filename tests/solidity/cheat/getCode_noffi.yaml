@@ -1,0 +1,3 @@
+allowFFI: false
+testLimit: 1
+seqLen: 1

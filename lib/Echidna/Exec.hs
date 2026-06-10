@@ -29,6 +29,7 @@ import EVM.Effects (defaultConfig)
 import EVM.Exec (exec, vmForEthrunCreation)
 import EVM.Fetch qualified
 import EVM.Format (hexText, showTraceTree)
+import EVM.GetCode qualified as GetCode
 import EVM.Types hiding (Env, Gas)
 
 import Echidna.Events (emptyEvents)
@@ -169,6 +170,11 @@ execTxWith executeTx tx = do
       Just (PleaseReadEnv var continuation) -> do
         value <- liftIO $ lookupEnv var
         fromEVM (continuation $ fromMaybe "" value)
+        runFully -- resume execution
+
+      Just (PleaseGetCode artifactRef continuation) -> do
+        res <- liftIO $ GetCode.getCodeFromEnv GetCode.PreferEchidna artifactRef
+        fromEVM (continuation res)
         runFully -- resume execution
 
       -- No queries to answer, the tx is fully executed and the result is final

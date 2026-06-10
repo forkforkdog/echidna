@@ -1,0 +1,5 @@
+{
+  "contractName": "GetCodeMissing",
+  "sourceName": "GetCodeMissing.sol",
+  "compiler": { "version": "0.8.18" }
+}
