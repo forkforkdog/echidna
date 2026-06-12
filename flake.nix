@@ -73,6 +73,7 @@
               ./nix/patches/hevm-direct-memory-copy-no-pad.patch
               ./nix/patches/hevm-config-gated-traces.patch
               ./nix/patches/hevm-getcode.patch
+              ./nix/patches/hevm-create2-prank-deployer.patch
             ] ++ extraPatches;
           }) { secp256k1 = pkgs.secp256k1; })
           ([
